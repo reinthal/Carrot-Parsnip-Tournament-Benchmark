@@ -1,6 +1,0 @@
-# Default 3-player game with Qwen3.8-27B on every seat (both roles).
-carrot:
-  model: openrouter/qwen/qwen3.8-27b
-parsnip:
-  model: openrouter/qwen/qwen3.8-27b
-eval_model: openrouter/qwen/qwen3.8-27b
