@@ -294,7 +294,10 @@ class GameConfig:
 
     def to_yaml(self, path: str | Path) -> Path:
         path = Path(path)
-        path.write_text(yaml.safe_dump(self.to_dict(), default_flow_style=False, sort_keys=False))
+        path.write_text(
+            yaml.dump(self.to_dict(), Dumper=_ConfigDumper,
+                      default_flow_style=False, sort_keys=False)
+        )
         return path
 
     @classmethod
@@ -313,6 +316,19 @@ class GameConfig:
         if not isinstance(raw, dict):
             raise ValueError(f"{path}: expected a YAML mapping, got {type(raw).__name__}")
         return cls.from_dict(raw)
+
+
+class _ConfigDumper(yaml.SafeDumper):
+    """SafeDumper that writes multiline strings (prompt templates) as
+    ``|`` block scalars instead of quoted one-liners."""
+
+
+def _str_representer(dumper: yaml.SafeDumper, data: str):
+    style = "|" if "\n" in data else None
+    return dumper.represent_scalar("tag:yaml.org,2002:str", data, style=style)
+
+
+_ConfigDumper.add_representer(str, _str_representer)
 
 
 def _check_keys(cls, raw: dict, where: str) -> None:

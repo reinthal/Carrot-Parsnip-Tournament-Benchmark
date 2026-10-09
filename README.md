@@ -24,7 +24,10 @@ python Carrot_Parsnip_Agents.py --config configs/default.yaml --mode tournament 
 ```
 
 A YAML file lists only the fields it changes; everything else keeps the
-default. `configs/default.yaml` is a full dump of every injectable field.
+default. `configs/default.yaml` shows the commonly-changed fields (all at
+their default values); dump every injectable field — including all prompt
+templates as `|` block scalars — with
+`python -c "from game_config import GameConfig; GameConfig().to_yaml('full.yaml')"`.
 
 ```yaml
 # configs/five_player.yaml
