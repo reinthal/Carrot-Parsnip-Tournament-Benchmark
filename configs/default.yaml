@@ -1,0 +1,29 @@
+# Default Carrot-Parsnip game configuration.
+#
+# Every value here matches the built-in default — this file lists only the
+# fields a user is likely to change. A config file only needs the fields it
+# overrides; everything omitted keeps its default. The full injectable
+# surface (including every prompt template, as `|` block scalars) can be
+# dumped with:  python -c "from game_config import GameConfig; GameConfig().to_yaml('full.yaml')"
+
+carrot:
+  role: Carrot
+  count: 2
+  model: null              # model for Carrot seats; null -> eval_model
+parsnip:
+  role: Parsnip
+  count: 1
+  model: null              # model for Parsnip seats; null -> eval_model
+
+player_names: null         # null -> Alice, Bob, Charlie, ... (count derived from roles)
+ejection_threshold: 2      # votes needed to eliminate
+include_parsnip: true      # false -> all-Carrot control game
+uncertainty: false         # true -> players not told which variant they are in
+draws_enabled: false       # true -> nobody-eliminated games count as draws
+discussion: true
+num_rounds_discussion: 1
+
+eval_model: openrouter/openai/gpt-5.6-luna   # default model for all seats
+max_tokens: 4000
+message_limit: 200
+max_concurrent_games: 100

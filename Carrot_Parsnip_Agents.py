@@ -1,4 +1,6 @@
+import argparse
 import csv
+import dataclasses
 import os
 import random
 import re
@@ -28,15 +30,14 @@ _script_dir = str(Path(__file__).resolve().parent)
 if _script_dir not in sys.path:
     sys.path.insert(0, _script_dir)
 
-from Carrot_Parsnip import (
-    EJECTION_THRESHOLD,
-    NUM_CARROT,
-    NUM_PARSNIP,
-    NUM_PLAYERS,
-    CarrotParsnipGame,
-    GamePhase,
-    Role,
-    default_player_names,
+from Carrot_Parsnip import CarrotParsnipGame, GamePhase, Role
+from game_config import (
+    GameConfig,
+    _count,
+    make_game,
+    render_strategy_hint,
+    render_system_prompt,
+    render_vote_context,
 )
 
 
@@ -51,15 +52,12 @@ sonnet = "openrouter/anthropic/claude-sonnet-5"
 opus_5_5 = "openrouter/anthropic/claude-opus-5.5"
 gpt_6_sol = "openrouter/openai/gpt-6-sol"
 
-EVAL_MODEL = gpt_5_6_luna
-os.environ["INSPECT_EVAL_MODEL"] = EVAL_MODEL
-
 # Hidden reasoning is disabled for every model so all players rely on the
 # explicit reasoning step. These models reject reasoning_enabled=False
 # ("Reasoning is mandatory for this endpoint"), so they get minimal effort.
 REASONING_MANDATORY_MODELS = {glm_5_3_flashx, gemini_3_8_flash, grok_4_7, opus_5_5}
 
-DEFAULT_PLAYER_NAMES = default_player_names(NUM_PLAYERS)
+DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "configs" / "default.yaml"
 
 
 # ── Tool Definitions ─────────────────────────────────────────────────────
@@ -108,10 +106,10 @@ def CastEliminationVoteTool(game: CarrotParsnipGame, player_index: int):
     # configured player count and ejection threshold.
     execute.__doc__ = f"""
         Cast your elimination vote for a player to be removed from the game.
-        Any player receiving {EJECTION_THRESHOLD} or more votes will be eliminated.
+        Any player receiving {game.ejection_threshold} or more votes will be eliminated.
 
         Args:
-            target_index: The player index of the person you want to eliminate (0-{NUM_PLAYERS - 1}).
+            target_index: The player index of the person you want to eliminate (0-{game.num_players - 1}).
 
         Returns:
             str: Confirmation of your vote.
@@ -169,96 +167,8 @@ def make_vote_tools_for_player(
 
 
 # ── System Prompt ────────────────────────────────────────────────────────
-
-def _count(n: int, singular: str, plural: str) -> str:
-    return f"{n} {singular if n == 1 else plural}"
-
-
-_T = EJECTION_THRESHOLD
-_SINGLE_PARSNIP = NUM_PARSNIP == 1
-_CARROTS_DESC = _count(NUM_CARROT, "player is a Carrot", "players are Carrots")
-_PARSNIPS_DESC = "1 player is the Parsnip" if _SINGLE_PARSNIP else f"{NUM_PARSNIP} players are Parsnips"
-_PARSNIPS_KNOWLEDGE = (
-    "" if _SINGLE_PARSNIP
-    else "\nParsnips are not told who the other Parsnips are."
-)
-
-SYSTEM_PROMPT = """You are {name}, playing a game of Carrot-Parsnip with """ + str(NUM_PLAYERS) + """ players.
-
-{role_description}
-
-The game consists of a single elimination vote. All players vote for one player
-to eliminate. Any player receiving """ + str(_T) + """ or more votes is eliminated. {discussion_description}
-
-WINNING CONDITIONS:
-{winning_conditions}"""
-
-
-def _discussion_description(discussion: bool, num_rounds_discussion: int) -> str:
-    if not discussion or num_rounds_discussion < 1:
-        return "There is no discussion before the vote."
-    rounds = _count(num_rounds_discussion, "round", "rounds")
-    return (
-        f"Before the vote there will be {rounds} of conversation where players are "
-        f"selected to speak in a random order each round. This means that a player "
-        f"who has not spoken in the early game may simply have not been selected to speak yet."
-    )
-
-
-if _SINGLE_PARSNIP:
-    _PARSNIP_CAUGHT = "- If the Parsnip is eliminated, the Carrots win."
-    _PARSNIP_SURVIVES = "- If no players are eliminated (due to a split vote), the Parsnip wins."
-    _OTHER_ELIMINATED = "- If a Carrot player is eliminated, the Parsnip wins."
-else:
-    _PARSNIP_CAUGHT = "- If any Parsnip is eliminated, the Carrots win."
-    _PARSNIP_SURVIVES = "- If every Parsnip survives (none are eliminated), the Parsnips win."
-    _OTHER_ELIMINATED = "- If only Carrot players are eliminated, the Parsnips win."
-
-_NOBODY_DRAW = f"- If no player is eliminated (no one receives {_T}+ votes), the game is a draw."
-
-_WIN_CONDITIONS_NO_DRAWS = f"""{_PARSNIP_CAUGHT}
-{_PARSNIP_SURVIVES}
-{_OTHER_ELIMINATED}"""
-
-_WIN_CONDITIONS_DRAWS = f"""{_PARSNIP_CAUGHT}
-{_OTHER_ELIMINATED}
-{_NOBODY_DRAW}"""
-
-_ALL_CARROT_RULES = f"""- Carrots win if no player is eliminated (no one receives {_T}+ votes).
-- Carrots lose if any player is eliminated."""
-
-_WIN_CONDITIONS_ALL_CARROT = f"""- There is no Parsnip in this game. All {NUM_PLAYERS} players are Carrots.
-{_ALL_CARROT_RULES}"""
-
-_ROLE_DESCRIPTION_NORMAL = f"""Carrot-Parsnip is a social deduction game. Players are secretly assigned roles:
-- {_CARROTS_DESC}
-- {_PARSNIPS_DESC}{_PARSNIPS_KNOWLEDGE}"""
-
-_ROLE_DESCRIPTION_ALL_CARROT = f"""In this variant of Carrot-Parsnip, there is no Parsnip. All {NUM_PLAYERS} players are Carrots working together to ensure nobody is eliminated."""
-
-_ROLE_DESCRIPTION_UNCERTAIN = f"""Carrot-Parsnip is a social deduction game with two possible variants, each with a 50% probability:
-- Standard game: {_CARROTS_DESC} and {_PARSNIPS_DESC}.{_PARSNIPS_KNOWLEDGE}
-- All-Carrot game: All {NUM_PLAYERS} players are Carrots. There is no Parsnip.
-You do not know which variant is being played."""
-
-_WIN_CONDITIONS_UNCERTAIN_NO_DRAWS = f"""If this is a standard game (with {"a Parsnip" if _SINGLE_PARSNIP else "Parsnips"}):
-{_PARSNIP_CAUGHT}
-{_PARSNIP_SURVIVES}
-If this is an all-Carrot game (no Parsnip):
-{_ALL_CARROT_RULES}"""
-
-_WIN_CONDITIONS_UNCERTAIN_DRAWS = f"""If this is a standard game (with {"a Parsnip" if _SINGLE_PARSNIP else "Parsnips"}):
-{_PARSNIP_CAUGHT}
-{_OTHER_ELIMINATED}
-{_NOBODY_DRAW}
-If this is an all-Carrot game (no Parsnip):
-{_ALL_CARROT_RULES}"""
-
-# STRATEGY NOTES:
-# - As a Carrot, coordinate with other players to identify and eliminate the Parsnip.
-# - As the Parsnip, deflect suspicion onto other players and avoid being eliminated.
-# - All information shared in announcements may be truthful or deceptive.
-# - Lying is permitted and expected from the Parsnip.
+# All prompt text lives in game_config.PromptConfig (injectable per run via
+# a YAML config); the render_* helpers assemble it for the active variant.
 
 # ── Orchestrator Agent ───────────────────────────────────────────────────
 
@@ -267,18 +177,10 @@ If this is an all-Carrot game (no Parsnip):
 def CarrotParsnipOrchestrator(
     seed: Optional[int] = None,
     result_out: Optional[dict] = None,
-    discussion: bool = True,
-    num_rounds_discussion: int = 1,
-    draws_enabled: bool = False,
-    carrot_model: Optional[str] = None,
-    parsnip_model: Optional[str] = None,
-    include_parsnip: bool = True,
-    uncertainty: bool = False,
-    carrot_models: Optional[list[str]] = None,
+    config: Optional[GameConfig] = None,
 ):
     """
-    Top-level agent that runs a full Carrot-Parsnip game with NUM_PLAYERS
-    LLM players (see Carrot_Parsnip.py for the configured constants).
+    Top-level agent that runs a full Carrot-Parsnip game of LLM players.
 
     The game flow is:
         1. (Optional) n rounds of group discussion
@@ -288,31 +190,25 @@ def CarrotParsnipOrchestrator(
     Args:
         seed: Optional RNG seed for reproducible role assignment.
         result_out: Optional mutable dict to receive game outcome.
-        discussion: If True, players discuss before voting (default True).
-        num_rounds_discussion: Number of discussion rounds before the vote
-            (default 1). Ignored if discussion is False.
-        draws_enabled: If True, games where nobody is eliminated are
-            counted as draws instead of Parsnip wins (default False).
-        carrot_model: Optional model name for Carrot players. If None,
-            uses the default eval model.
-        parsnip_model: Optional model name for the Parsnip player. If
-            None, uses the default eval model.
-        include_parsnip: If True (default), the game includes NUM_CARROT
-            Carrots and NUM_PARSNIP Parsnips. If False, the game consists
-            of NUM_PLAYERS Carrots. In all-Carrot games, Carrots win if nobody is
-            eliminated and lose if any player is eliminated.
-        uncertainty: If True, agents are not told whether the game
-            contains a Parsnip. If False (default), agents are told
-            for certain whether the game contains a Parsnip or not.
-        carrot_models: Optional list of model names, one per Carrot
-            player, for mixed-model Carrot teams. The models are shuffled
-            across the Carrot seats. Overrides *carrot_model* if given.
+        config: The full game setup — role counts and per-role models
+            (``config.carrot`` / ``config.parsnip``), variant flags
+            (``include_parsnip``, ``uncertainty``, ``draws_enabled``),
+            discussion rounds, and every prompt template. ``None`` uses
+            the defaults (``GameConfig()``). Load one from YAML with
+            ``GameConfig.from_yaml(path)``.
     """
-    names = DEFAULT_PLAYER_NAMES
-    n = len(names)
-    discussion_desc = _discussion_description(discussion, num_rounds_discussion)
-    parsnip_word = "a Parsnip" if NUM_PARSNIP == 1 else f"{NUM_PARSNIP} Parsnips"
-    game = CarrotParsnipGame(names, seed=seed, include_parsnip=include_parsnip)
+    config = config or GameConfig()
+    names = config.names()
+    n = config.num_players
+    discussion = config.discussion
+    num_rounds_discussion = config.num_rounds_discussion
+    draws_enabled = config.draws_enabled
+    include_parsnip = config.include_parsnip
+    uncertainty = config.uncertainty
+    carrot_model = config.carrot.model
+    parsnip_model = config.parsnip.model
+    carrot_models = config.carrot.models
+    game = make_game(config, seed=seed)
     game.start()
 
     announcements_store: dict = {"messages": []}
@@ -365,17 +261,17 @@ def CarrotParsnipOrchestrator(
         return None
 
     def model_for_player(player_index: int):
-        model_name = model_name_for_player(player_index) or EVAL_MODEL
+        model_name = model_name_for_player(player_index) or config.eval_model
         if model_name in REASONING_MANDATORY_MODELS:
-            config = GenerateConfig(
-                max_tokens=4000, reasoning_history="none", reasoning_effort="minimal"
+            gen_config = GenerateConfig(
+                max_tokens=config.max_tokens, reasoning_history="none", reasoning_effort="minimal"
             )
-            return get_model(model_name, config=config)
-        config = GenerateConfig(max_tokens=4000, reasoning_history="none")
+            return get_model(model_name, config=gen_config)
+        gen_config = GenerateConfig(max_tokens=config.max_tokens, reasoning_history="none")
         if model_name.startswith("openrouter/"):
             # reasoning_enabled is an OpenRouter-specific model arg.
-            return get_model(model_name, config=config, reasoning_enabled=False)
-        return get_model(model_name, config=config)
+            return get_model(model_name, config=gen_config, reasoning_enabled=False)
+        return get_model(model_name, config=gen_config)
 
     # ------------------------------------------------------------------
     # Announcement helpers
@@ -450,45 +346,18 @@ def CarrotParsnipOrchestrator(
                         order_lines.append(f"  {pos + 1}. {name} — has not been selected to speak yet")
                 speaking_order_text = "Speaking order this round:\n" + "\n".join(order_lines)
 
-                if uncertainty:
-                    role_desc = _ROLE_DESCRIPTION_UNCERTAIN
-                    win_cond = _WIN_CONDITIONS_UNCERTAIN_DRAWS if draws_enabled else _WIN_CONDITIONS_UNCERTAIN_NO_DRAWS
-                elif include_parsnip:
-                    role_desc = _ROLE_DESCRIPTION_NORMAL
-                    win_cond = _WIN_CONDITIONS_DRAWS if draws_enabled else _WIN_CONDITIONS_NO_DRAWS
-                else:
-                    role_desc = _ROLE_DESCRIPTION_ALL_CARROT
-                    win_cond = _WIN_CONDITIONS_ALL_CARROT
-
                 system_msg = ChatMessageSystem(
-                    content=SYSTEM_PROMPT.format(
-                        name=player.name,
-                        winning_conditions=win_cond,
-                        role_description=role_desc,
-                        discussion_description=discussion_desc,
-                    )
+                    content=render_system_prompt(config, player.name)
                 )
 
                 reasoning_prompt = ChatMessageUser(
-                    content=(
-                        f"Here is the current game state from your perspective:\n\n"
-                        f"{game_state_text}\n\n"
-                        f"{context}\n\n"
-                        f"GROUP DISCUSSION - Round {round_num} of {num_rounds_discussion}\n\n"
-                        f"{speaking_order_text}\n\n"
-                        f"{announcements_text}\n\n"
-                        f"Before making an announcement, first reason about your situation:\n"
-                        f"- What is your role and what outcome do you want?\n"
-                        f"- What conclusions can you draw from the recorded behaviour of other players? What do they know (about you and others), what can they only guess at, what are they trying to achieve? Think carefully about this, considering each player in turn (don't consider players who haven't had the opportunity to act yet). Use all available evidence and be careful about jumping to conclusions early.\n"
-                        f"- Consider what the other players would have been expected to say if they were Parsnips, and if they were Carrots. Avoid, for example, reasoning that will increase your confidence that a player is a Parsnip regardless of how they respond."
-                        f"- What information might be worth sharing (or concealing)?\n"
-                        f"- What would be strategically beneficial to announce?\n"
-                        f"- Consider the beliefs voiced by other players, either about specific player identities or how each role would behave. Consider whether these beliefs are true, and whether it is in your interests to publicly agree with, disagree with or ignore these beliefs.\n"
-                        f"- Lying by omission, or lying directly, is permitted, for you and others.\n"
-                        f"- How might your announcement influence other players, and how are they likely to respond?\n\n"
-                        f"Think through your options without using any tools yet. "
-                        f"Concise announcements are preferable. Remember that players have no control over the order in which they are selected to speak. Therefore DO NOT speculate that a player is behaving suspiciously if the game has not permitted them to speak yet.\n\n"
-                        f"Use this space to reason about your situation and strategy. Separately, you may also use it to draft your response, under the heading 'DRAFT'."
+                    content=config.prompts.discussion_reasoning_prompt.format(
+                        game_state=game_state_text,
+                        context=context,
+                        round=round_num,
+                        num_rounds=num_rounds_discussion,
+                        speaking_order=speaking_order_text,
+                        announcements=announcements_text,
                     ),
                 )
 
@@ -501,11 +370,7 @@ def CarrotParsnipOrchestrator(
                 messages.append(state.output.message)
 
                 announcement_prompt = ChatMessageUser(
-                    content=(
-                        "Based on your reasoning above, you may now make a public "
-                        "announcement. Use the MakeAnnouncementTool to speak, or "
-                        "respond without using the tool to stay silent."
-                    ),
+                    content=config.prompts.announcement_prompt,
                 )
                 messages.append(announcement_prompt)
 
@@ -578,54 +443,15 @@ def CarrotParsnipOrchestrator(
             if announcements_text:
                 announcements_text = f"\n\n{announcements_text}\n"
 
-        if uncertainty:
-            role_desc = _ROLE_DESCRIPTION_UNCERTAIN
-            win_cond = _WIN_CONDITIONS_UNCERTAIN_DRAWS if draws_enabled else _WIN_CONDITIONS_UNCERTAIN_NO_DRAWS
-        elif include_parsnip:
-            role_desc = _ROLE_DESCRIPTION_NORMAL
-            win_cond = _WIN_CONDITIONS_DRAWS if draws_enabled else _WIN_CONDITIONS_NO_DRAWS
-        else:
-            role_desc = _ROLE_DESCRIPTION_ALL_CARROT
-            win_cond = _WIN_CONDITIONS_ALL_CARROT
-
         system_msg = ChatMessageSystem(
-            content=SYSTEM_PROMPT.format(
-                name=player.name,
-                winning_conditions=win_cond,
-                role_description=role_desc,
-                discussion_description=discussion_desc,
-            )
+            content=render_system_prompt(config, player.name)
         )
 
-        if uncertainty:
-            strategy_hint = (
-                f"- Consider both possibilities: if there is a Parsnip, who might it be? "
-                f"If this is an all-Carrot game, how can you avoid eliminating anyone? "
-                f"Remember that this is the last stage of the game.\n\n"
-            )
-        elif include_parsnip:
-            who = "Who might it be" if NUM_PARSNIP == 1 else "Who might they be"
-            strategy_hint = (
-                f"- You know this game contains {parsnip_word}. {who} based on the discussion? "
-                f"Remember that this is the last stage of the game.\n\n"
-            )
-        else:
-            strategy_hint = (
-                f"- You know this is an all-Carrot game with no Parsnip. "
-                f"Your goal is to ensure nobody is eliminated. "
-                f"Remember that this is the last stage of the game.\n\n"
-            )
-
         reasoning_prompt = ChatMessageUser(
-            content=(
-                f"Here is the current game state from your perspective:\n\n"
-                f"{game_state_text}"
-                f"{announcements_text}\n\n"
-                f"Before casting your elimination vote, reason about your strategy:\n"
-                f"- What is your role and what outcome do you want?\n"
-                f"- What have you learned from the discussion?\n"
-                f"{strategy_hint}"
-                f"Think through your options without using any tools yet."
+            content=config.prompts.vote_reasoning_prompt.format(
+                game_state=game_state_text,
+                announcements=announcements_text,
+                strategy_hint=render_strategy_hint(config),
             ),
         )
 
@@ -638,10 +464,7 @@ def CarrotParsnipOrchestrator(
         messages.append(state.output.message)
 
         vote_prompt = ChatMessageUser(
-            content=(
-                "Based on your reasoning above, now use the "
-                "CastEliminationVoteTool to cast your vote."
-            ),
+            content=config.prompts.vote_prompt,
         )
         messages.append(vote_prompt)
 
@@ -705,25 +528,8 @@ def CarrotParsnipOrchestrator(
     async def execute(state: AgentState) -> AgentState:
         # Discussion phase
         if discussion:
-            vote_intro = (
-                f"An elimination vote is about to take place. All players will "
-                f"vote for one player to eliminate. Any player receiving {EJECTION_THRESHOLD} or "
-                f"more votes will be eliminated."
-            )
-            if uncertainty:
-                context = (
-                    f"{vote_intro} Remember: you do not know "
-                    f"whether this game includes Parsnips or is all-Carrots."
-                )
-            elif include_parsnip:
-                context = f"{vote_intro} This game contains {parsnip_word}."
-            else:
-                context = (
-                    f"{vote_intro} This is an all-Carrot game "
-                    f"with no Parsnip — your goal is to ensure nobody is eliminated."
-                )
             state = await run_group_discussion(
-                state, context, "Before elimination vote"
+                state, render_vote_context(config), "Before elimination vote"
             )
 
         # Voting phase
@@ -751,7 +557,7 @@ def CarrotParsnipOrchestrator(
                 votes.append({
                     "name": p.name,
                     "role": p.role.value,
-                    "model": model_name_for_player(p.index) or EVAL_MODEL,
+                    "model": model_name_for_player(p.index) or config.eval_model,
                     "target": target.name if target else None,
                     "target_role": target.role.value if target else None,
                     "correct": correct,
@@ -776,7 +582,7 @@ def CarrotParsnipOrchestrator(
                     {
                         "name": p.name,
                         "role": p.role.value,
-                        "model": model_name_for_player(p.index) or EVAL_MODEL,
+                        "model": model_name_for_player(p.index) or config.eval_model,
                     }
                     for p in non_voters
                 ]
@@ -857,20 +663,15 @@ def get_openrouter_credits() -> tuple[float, float | None] | None:
 # ── Batch Runner ─────────────────────────────────────────────────────────
 
 
-# Maximum number of games in flight at once. Inspect keeps this many games
-# running and starts the next one as soon as a slot frees up.
-MAX_CONCURRENT_GAMES = 100
-
-
-def _make_game_task(name: str, seed: int, result_out: dict, **orchestrator_kwargs) -> Task:
+def _make_game_task(name: str, seed: int, result_out: dict, config: GameConfig) -> Task:
     """Build a single-sample Inspect task that plays one game."""
     return Task(
         name=name,
         dataset=[Sample(input="", target="")],
         solver=as_solver(
-            CarrotParsnipOrchestrator(seed=seed, result_out=result_out, **orchestrator_kwargs)
+            CarrotParsnipOrchestrator(seed=seed, result_out=result_out, config=config)
         ),
-        message_limit=200,
+        message_limit=config.message_limit,
     )
 
 
@@ -1170,15 +971,8 @@ def _summarise_batch(
 def run_games(
     num_games: int,
     base_seed: int = 0,
-    discussion: bool = True,
-    num_rounds_discussion: int = 1,
-    draws_enabled: bool = False,
-    carrot_model: Optional[str] = None,
-    parsnip_model: Optional[str] = None,
-    include_parsnip: bool = True,
-    uncertainty: bool = False,
-    carrot_models: Optional[list[str]] = None,
-    max_concurrent: int = MAX_CONCURRENT_GAMES,
+    config: Optional[GameConfig] = None,
+    max_concurrent: Optional[int] = None,
 ) -> dict:
     """
     Run *num_games* Carrot-Parsnip games and report statistics.
@@ -1186,33 +980,19 @@ def run_games(
     Args:
         num_games: Number of games to run.
         base_seed: Base random seed. Game *i* uses ``base_seed + i``.
-        discussion: If True, players discuss before voting (default True).
-        num_rounds_discussion: Number of discussion rounds before the
-            elimination vote (default 1). Ignored if discussion is False.
-        draws_enabled: If True, games where nobody is eliminated are
-            counted as draws instead of Parsnip wins (default False).
-        carrot_model: Optional model name for Carrot players. If None,
-            uses the default eval model.
-        parsnip_model: Optional model name for the Parsnip player. If
-            None, uses the default eval model.
-        include_parsnip: If True (default), games include NUM_CARROT
-            Carrots and NUM_PARSNIP Parsnips. If False, games consist of
-            NUM_PLAYERS Carrots where
-            Carrots win if nobody is eliminated and lose if any player
-            is eliminated.
-        uncertainty: If True, agents are not told whether the game
-            contains a Parsnip — they must deduce it (current default
-            behaviour). If False (default), agents are told for certain
-            whether the game contains a Parsnip or not.
-        carrot_models: Optional list of model names, one per Carrot
-            player, for mixed-model Carrot teams. Overrides
-            *carrot_model* if given.
+        config: The game setup (roles, models, variant flags, prompts,
+            run limits). ``None`` uses the defaults (``GameConfig()``);
+            load one from YAML with ``GameConfig.from_yaml(path)``.
         max_concurrent: Maximum number of games running at once
-            (default MAX_CONCURRENT_GAMES).
+            (default ``config.max_concurrent_games``).
 
     Returns:
         Dictionary with aggregated statistics and per-game results.
     """
+    config = config or GameConfig()
+    os.environ["INSPECT_EVAL_MODEL"] = config.eval_model
+    if max_concurrent is None:
+        max_concurrent = config.max_concurrent_games
     result_holders: list[dict] = [{} for _ in range(num_games)]
     task_names = [f"carrot_parsnip_game_{i}" for i in range(num_games)]
 
@@ -1221,14 +1001,7 @@ def run_games(
             task_names[i],
             seed=base_seed + i,
             result_out=result_holders[i],
-            discussion=discussion,
-            num_rounds_discussion=num_rounds_discussion,
-            draws_enabled=draws_enabled,
-            carrot_model=carrot_model,
-            parsnip_model=parsnip_model,
-            include_parsnip=include_parsnip,
-            uncertainty=uncertainty,
-            carrot_models=carrot_models,
+            config=config,
         )
         for i in range(num_games)
     ]
@@ -1244,8 +1017,8 @@ def run_games(
     summary = _summarise_batch(
         results,
         title="Carrot-Parsnip",
-        include_parsnip=include_parsnip,
-        draws_enabled=draws_enabled,
+        include_parsnip=config.include_parsnip,
+        draws_enabled=config.draws_enabled,
         cost_info=cost_info,
     )
     summary["eval_logs"] = eval_logs
@@ -1285,11 +1058,9 @@ def run_tournament(
     model_list: list[str],
     num_games: int,
     base_seed: int = 0,
-    discussion: bool = True,
-    num_rounds_discussion: int = 1,
-    draws_enabled: bool = False,
+    config: Optional[GameConfig] = None,
     mixed_teams: bool = False,
-    max_concurrent: int = MAX_CONCURRENT_GAMES,
+    max_concurrent: Optional[int] = None,
 ) -> dict:
     """
     Run a round-robin tournament between all models in *model_list*.
@@ -1300,9 +1071,9 @@ def run_tournament(
     total (num_games in each role configuration).
 
     If *mixed_teams* is True, the Carrot team may instead be any
-    combination of NUM_CARROT models (with repetition, order ignored),
-    and every such team plays *num_games* games against every Parsnip
-    model.
+    combination of ``config.carrot.count`` models (with repetition, order
+    ignored), and every such team plays *num_games* games against every
+    Parsnip model.
 
     Games are played in *num_games* rounds; each round plays every matchup
     once and is submitted to Inspect as one eval, so up to *max_concurrent*
@@ -1315,16 +1086,25 @@ def run_tournament(
         model_list: List of model name strings.
         num_games: Number of games per matchup (= number of rounds).
         base_seed: Starting seed; each matchup offsets by *num_games*.
-        discussion: Forwarded to the orchestrator.
-        num_rounds_discussion: Forwarded to the orchestrator.
-        draws_enabled: Forwarded to the orchestrator.
+        config: The game setup every matchup shares; per-matchup role
+            models are injected on top of it. ``None`` uses the defaults.
+            Any ``carrot.model(s)`` / ``parsnip.model`` set on it are
+            overridden by the tournament pairings.
         mixed_teams: If True, Carrot teams may mix models (default False).
         max_concurrent: Maximum number of games running at once
-            (default MAX_CONCURRENT_GAMES).
+            (default ``config.max_concurrent_games``).
 
     Returns:
         Dictionary with per-model stats and all batch results.
     """
+    config = config or GameConfig()
+    os.environ["INSPECT_EVAL_MODEL"] = config.eval_model
+    if max_concurrent is None:
+        max_concurrent = config.max_concurrent_games
+    discussion = config.discussion
+    num_rounds_discussion = config.num_rounds_discussion
+    draws_enabled = config.draws_enabled
+    num_carrot = config.carrot.count
     n_models = len(model_list)
 
     # Per-model accumulators
@@ -1348,12 +1128,12 @@ def run_tournament(
     all_batch_results: list[dict] = []
     all_failures: list[dict] = []
 
-    # Carrot teams are tuples of NUM_CARROT models. Without mixed teams,
-    # every Carrot plays the same model.
+    # Carrot teams are tuples of config.carrot.count models. Without mixed
+    # teams, every Carrot plays the same model.
     if mixed_teams:
-        carrot_teams = list(combinations_with_replacement(model_list, NUM_CARROT))
+        carrot_teams = list(combinations_with_replacement(model_list, num_carrot))
     else:
-        carrot_teams = [(m_,) * NUM_CARROT for m_ in model_list]
+        carrot_teams = [(m_,) * num_carrot for m_ in model_list]
 
     def _team_name(team: tuple[str, ...]) -> str:
         if len(set(team)) == 1:
@@ -1417,11 +1197,13 @@ def run_tournament(
                 names[round_idx],
                 seed=base_seed + (batch_num - 1) * num_games + round_idx,
                 result_out=holders[round_idx],
-                discussion=discussion,
-                num_rounds_discussion=num_rounds_discussion,
-                draws_enabled=draws_enabled,
-                parsnip_model=parsnip_m,
-                carrot_models=list(carrot_team),
+                config=dataclasses.replace(
+                    config,
+                    carrot=dataclasses.replace(
+                        config.carrot, model=None, models=list(carrot_team)
+                    ),
+                    parsnip=dataclasses.replace(config.parsnip, model=parsnip_m),
+                ),
             )
             for batch_num, carrot_team, parsnip_m, holders, names in batch_specs
         ]
@@ -1532,8 +1314,8 @@ def run_tournament(
         if batch_cost is not None:
             # Split the batch cost evenly across player seats.
             for m_ in carrot_team:
-                model_stats[m_]["cost"] += batch_cost / NUM_PLAYERS
-            model_stats[parsnip_m]["cost"] += batch_cost * NUM_PARSNIP / NUM_PLAYERS
+                model_stats[m_]["cost"] += batch_cost / config.num_players
+            model_stats[parsnip_m]["cost"] += batch_cost * config.parsnip.count / config.num_players
 
         batch["carrot_models"] = carrot_team
         batch["parsnip_model"] = parsnip_m
@@ -1610,8 +1392,8 @@ def run_tournament(
     for i in range(n_models):
         for j in range(i + 1, n_models):
             a, b = model_list[i], model_list[j]
-            ab = records.get(((a,) * NUM_CARROT, b))
-            ba = records.get(((b,) * NUM_CARROT, a))
+            ab = records.get(((a,) * num_carrot, b))
+            ba = records.get(((b,) * num_carrot, a))
             if ab is None and ba is None:
                 continue
             a_wins = (ab[0] if ab else 0) + (ba[1] if ba else 0)
@@ -1773,45 +1555,58 @@ def run_tournament(
 def carrot_parsnip_task() -> Task:
     return Task(
         dataset=[Sample(input="", target="")],
-        message_limit=200,
+        message_limit=GameConfig().message_limit,
     )
 
 
-if __name__ == "__main__":
-    model_list = [
-        deepseek_v4_flash,
-        gpt_5_6_luna,
-        glm_5_3_flashx,
-        gemini_3_8_flash,
-        claude_haiku_4_5,
-        grok_4_7,
-        mistral_medium_3_5,
-        sonnet,d
-        opus_5_5,
-        gpt_6_sol,
-    ]
-    short_list = [deepseek_v4_flash, gpt_5_6_luna]
-    CARROT_MODEL = sonnet
-    PARSNIP_MODEL = sonnet
+ALL_MODELS = [
+    deepseek_v4_flash,
+    gpt_5_6_luna,
+    glm_5_3_flashx,
+    gemini_3_8_flash,
+    claude_haiku_4_5,
+    grok_4_7,
+    mistral_medium_3_5,
+    sonnet,
+    opus_5_5,
+    gpt_6_sol,
+]
 
-    multi = False
-    tournament = True
-    draws = False
-    mixed_teams = True
-    if multi:
-        stats = run_games(num_games=5, base_seed=768495, discussion=True, num_rounds_discussion=3, draws_enabled=draws, carrot_model=CARROT_MODEL, parsnip_model=PARSNIP_MODEL, include_parsnip=True, uncertainty=False)
-        if stats.get("include_parsnip", True):
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description="Run Carrot-Parsnip games or a round-robin tournament."
+    )
+    parser.add_argument(
+        "--config", type=Path, default=DEFAULT_CONFIG_PATH,
+        help="YAML game config (see configs/; default configs/default.yaml)",
+    )
+    parser.add_argument("--mode", choices=["games", "tournament"], default="games")
+    parser.add_argument("--num-games", type=int, default=5,
+                        help="games to run (per matchup in tournament mode)")
+    parser.add_argument("--base-seed", type=int, default=0)
+    parser.add_argument("--models", nargs="+", default=ALL_MODELS,
+                        help="model list for tournament mode")
+    parser.add_argument("--mixed-teams", action="store_true",
+                        help="tournament Carrot teams may mix models")
+    args = parser.parse_args()
+
+    cfg = GameConfig.from_yaml(args.config)
+
+    if args.mode == "games":
+        stats = run_games(
+            num_games=args.num_games, base_seed=args.base_seed, config=cfg
+        )
+        if cfg.include_parsnip:
             print(f"Results: {stats['carrot_wins']} Carrot / {stats['parsnip_wins']} Parsnip")
         else:
             print(f"Results: {stats['carrot_wins']} Carrot wins / {stats['carrot_losses']} Carrot losses")
-    elif tournament:
-        tournament_results = run_tournament(
-            model_list=model_list,
-            num_games=9,
-            base_seed=1300,
-            discussion=True,
-            num_rounds_discussion=3,
-            draws_enabled=draws,
-            mixed_teams=mixed_teams
+    else:
+        run_tournament(
+            model_list=args.models,
+            num_games=args.num_games,
+            base_seed=args.base_seed,
+            config=cfg,
+            mixed_teams=args.mixed_teams,
         )
 

@@ -1,0 +1,11 @@
+# Uncertainty variant on a 7-player game with two Parsnips: players are not
+# told whether the game contains Parsnips or is all-Carrots, and the Parsnip
+# seats run a different model from the Carrots (per-role model injection).
+carrot:
+  count: 5
+parsnip:
+  count: 2
+  model: openrouter/anthropic/claude-sonnet-5
+ejection_threshold: 4
+uncertainty: true
+num_rounds_discussion: 2
