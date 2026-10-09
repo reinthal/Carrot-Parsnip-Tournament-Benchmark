@@ -1,0 +1,9 @@
+# 5-player variant: 4 Carrots vs 1 Parsnip, majority threshold 3, three
+# discussion rounds. Only deltas from configs/default.yaml are listed —
+# every number below propagates into the players' prompts automatically.
+carrot:
+  count: 4
+parsnip:
+  count: 1
+ejection_threshold: 3
+num_rounds_discussion: 3

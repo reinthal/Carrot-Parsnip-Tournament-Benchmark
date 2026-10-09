@@ -1,7 +1,8 @@
 """
 Carrot-Parsnip – A single-round elimination game.
 
-Roles (configurable via the constants below):
+Roles (the constants below are the defaults; pass num_carrot/num_parsnip to
+the constructor — or use game_config.GameConfig — to override per game):
     NUM_CARROT  x Carrot players
     NUM_PARSNIP x Parsnip players
 
@@ -92,21 +93,52 @@ def default_player_names(n: int = NUM_PLAYERS) -> list[str]:
 
 
 class CarrotParsnipGame:
-    """Single-round elimination game for NUM_PLAYERS players."""
+    """Single-round elimination game. The role split, ejection threshold and
+    private role knowledge are per-instance; omitting the counts uses the
+    module-constant defaults (which require exactly NUM_PLAYERS names)."""
 
-    def __init__(self, player_names: list[str], seed: Optional[int] = None, include_parsnip: bool = True):
+    def __init__(
+        self,
+        player_names: list[str],
+        seed: Optional[int] = None,
+        include_parsnip: bool = True,
+        *,
+        num_carrot: Optional[int] = None,
+        num_parsnip: Optional[int] = None,
+        ejection_threshold: int = EJECTION_THRESHOLD,
+        role_knowledge: Optional[dict[Role, str]] = None,
+    ):
         n = len(player_names)
-        if n != NUM_PLAYERS:
-            raise ValueError(f"Carrot-Parsnip requires exactly {NUM_PLAYERS} players, got {n}")
+        if (num_carrot is None) != (num_parsnip is None):
+            raise ValueError("pass both num_carrot and num_parsnip, or neither")
+        if num_carrot is None:
+            if n != NUM_PLAYERS:
+                raise ValueError(f"Carrot-Parsnip requires exactly {NUM_PLAYERS} players, got {n}")
+            num_carrot, num_parsnip = NUM_CARROT, NUM_PARSNIP
+        if num_carrot + num_parsnip != n:
+            raise ValueError(
+                f"num_carrot ({num_carrot}) + num_parsnip ({num_parsnip}) "
+                f"must equal the number of players ({n})"
+            )
+        if num_carrot < 1 or num_parsnip < 1:
+            raise ValueError("num_carrot and num_parsnip must each be at least 1")
+        if not 1 <= ejection_threshold <= n:
+            raise ValueError(f"ejection_threshold must be between 1 and {n}, got {ejection_threshold}")
+
+        self.num_players = n
+        self.num_carrot = num_carrot
+        self.num_parsnip = num_parsnip
+        self.ejection_threshold = ejection_threshold
+        self.role_knowledge = role_knowledge
 
         self.rng = random.Random(seed)
         self.include_parsnip = include_parsnip
 
         # Assign roles
         if include_parsnip:
-            roles: list[Role] = [Role.CARROT] * NUM_CARROT + [Role.PARSNIP] * NUM_PARSNIP
+            roles: list[Role] = [Role.CARROT] * num_carrot + [Role.PARSNIP] * num_parsnip
         else:
-            roles: list[Role] = [Role.CARROT] * NUM_PLAYERS
+            roles: list[Role] = [Role.CARROT] * n
         self.rng.shuffle(roles)
 
         self.players: list[Player] = [
@@ -128,16 +160,18 @@ class CarrotParsnipGame:
         self._started = True
 
         for p in self.players:
-            if p.role == Role.CARROT:
+            if self.role_knowledge is not None:
+                self.private_knowledge[p.index].append(self.role_knowledge[p.role])
+            elif p.role == Role.CARROT:
                 self.private_knowledge[p.index].append("You are a Carrot player.")
-            elif NUM_PARSNIP == 1:
+            elif self.num_parsnip == 1:
                 self.private_knowledge[p.index].append("You are the Parsnip player.")
             else:
                 self.private_knowledge[p.index].append(
-                    f"You are a Parsnip player (one of {NUM_PARSNIP} Parsnips)."
+                    f"You are a Parsnip player (one of {self.num_parsnip} Parsnips)."
                 )
 
-        self._log("Game started with %d players. Vote to eliminate!", NUM_PLAYERS)
+        self._log("Game started with %d players. Vote to eliminate!", self.num_players)
 
     # ── Agent Interface ──────────────────────────────────────────────
 
@@ -160,7 +194,7 @@ class CarrotParsnipGame:
             "options": targets,
             "description": (
                 f"Elimination Vote: all players vote for a player to eliminate. "
-                f"A player receiving {EJECTION_THRESHOLD}+ votes is eliminated."
+                f"A player receiving {self.ejection_threshold}+ votes is eliminated."
             ),
         }
 
@@ -244,12 +278,12 @@ class CarrotParsnipGame:
             return {"success": False, "message": "Not in ELIMINATION_VOTE phase."}
         if player_index in self.votes:
             return {"success": False, "message": f"{self.players[player_index].name} already voted."}
-        if target_index < 0 or target_index >= NUM_PLAYERS:
+        if target_index < 0 or target_index >= self.num_players:
             return {"success": False, "message": f"Invalid target index {target_index}."}
 
         self.votes[player_index] = target_index
 
-        if len(self.votes) == NUM_PLAYERS:
+        if len(self.votes) == self.num_players:
             return self._resolve_elimination()
         return {"success": True, "message": f"{self.players[player_index].name} voted."}
 
@@ -264,7 +298,7 @@ class CarrotParsnipGame:
             for i, t in sorted(self.votes.items())
         )
 
-        eliminated: list[int] = [idx for idx, count in tally.items() if count >= EJECTION_THRESHOLD]
+        eliminated: list[int] = [idx for idx, count in tally.items() if count >= self.ejection_threshold]
 
         for idx in eliminated:
             self.players[idx].alive = False
@@ -278,18 +312,18 @@ class CarrotParsnipGame:
             if parsnip_eliminated:
                 self.winner = Team.CARROT
                 self._log("Elimination: %s eliminated! [%s]", names, ballots)
-                if NUM_PARSNIP == 1:
+                if self.num_parsnip == 1:
                     self._log("Carrots win! The Parsnip has been found.")
                 else:
                     self._log("Carrots win! A Parsnip has been found.")
             else:
                 if eliminated:
-                    no_parsnip = "the Parsnip" if NUM_PARSNIP == 1 else "a Parsnip"
+                    no_parsnip = "the Parsnip" if self.num_parsnip == 1 else "a Parsnip"
                     self._log("Elimination: %s eliminated, but not %s! [%s]", names, no_parsnip, ballots)
                 else:
-                    self._log("Elimination: No one received %d+ votes. [%s]", EJECTION_THRESHOLD, ballots)
+                    self._log("Elimination: No one received %d+ votes. [%s]", self.ejection_threshold, ballots)
                 self.winner = Team.PARSNIP
-                if NUM_PARSNIP == 1:
+                if self.num_parsnip == 1:
                     self._log("Parsnip wins! The Parsnip survived.")
                 else:
                     self._log("Parsnips win! All Parsnips survived.")
@@ -301,7 +335,7 @@ class CarrotParsnipGame:
                 self.winner = Team.PARSNIP  # Carrots lose
                 self._log("Carrots lose! A player was eliminated.")
             else:
-                self._log("Elimination: No one received %d+ votes. [%s]", EJECTION_THRESHOLD, ballots)
+                self._log("Elimination: No one received %d+ votes. [%s]", self.ejection_threshold, ballots)
                 self.winner = Team.CARROT
                 self._log("Carrots win! No one was eliminated.")
 
