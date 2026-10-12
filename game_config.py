@@ -240,6 +240,10 @@ class GameConfig:
     ejection_threshold: int = 2
     include_parsnip: bool = True
     uncertainty: bool = False
+    # Prompts shown when include_parsnip is false: "all_carrot" tells the players
+    # there is no Parsnip; "standard" shows the normal-game prompts verbatim, so
+    # an all-Carrot control game reads exactly like a standard one.
+    all_carrot_prompts: str = "all_carrot"
     draws_enabled: bool = False
     discussion: bool = True
     num_rounds_discussion: int = 1
@@ -265,6 +269,14 @@ class GameConfig:
             raise ValueError(f"parsnip.role must be {Role.PARSNIP.value!r}, got {self.parsnip.role.value!r}")
         if self.carrot.count < 1 or self.parsnip.count < 1:
             raise ValueError("carrot.count and parsnip.count must each be at least 1")
+        if self.all_carrot_prompts not in ("all_carrot", "standard"):
+            raise ValueError(
+                f"all_carrot_prompts must be 'all_carrot' or 'standard', got {self.all_carrot_prompts!r}"
+            )
+        if self.all_carrot_prompts == "standard" and (self.include_parsnip or self.uncertainty):
+            raise ValueError(
+                "all_carrot_prompts='standard' requires include_parsnip=false and uncertainty=false"
+            )
         if not 1 <= self.ejection_threshold <= self.num_players:
             raise ValueError(
                 f"ejection_threshold must be between 1 and {self.num_players}, got {self.ejection_threshold}"
@@ -379,11 +391,25 @@ def parsnip_word(config: GameConfig) -> str:
     return "a Parsnip" if n == 1 else f"{n} Parsnips"
 
 
+def prompt_variant(config: GameConfig) -> str:
+    """Which prompt family the players see: "uncertain", "normal" or "all_carrot".
+
+    An all-Carrot game with ``all_carrot_prompts: standard`` renders the
+    normal prompts, so the only difference from a standard game is the roster.
+    """
+    if config.uncertainty:
+        return "uncertain"
+    if config.include_parsnip or config.all_carrot_prompts == "standard":
+        return "normal"
+    return "all_carrot"
+
+
 def render_role_description(config: GameConfig) -> str:
     p = config.prompts
-    if config.uncertainty:
+    variant = prompt_variant(config)
+    if variant == "uncertain":
         template = p.role_description_uncertain
-    elif config.include_parsnip:
+    elif variant == "normal":
         template = p.role_description_normal
     else:
         return p.role_description_all_carrot.format(num_players=config.num_players)
@@ -405,14 +431,15 @@ def render_win_conditions(config: GameConfig) -> str:
     draw = p.win_nobody_draw.format(ejection_threshold=t)
     all_carrot_rules = p.all_carrot_rules.format(ejection_threshold=t)
 
-    if config.uncertainty:
+    variant = prompt_variant(config)
+    if variant == "uncertain":
         standard = f"{caught}\n{other}\n{draw}" if config.draws_enabled else f"{caught}\n{survives}"
         return p.win_conditions_uncertain.format(
             parsnip_word="a Parsnip" if single else "Parsnips",
             standard_conditions=standard,
             all_carrot_rules=all_carrot_rules,
         )
-    if not config.include_parsnip:
+    if variant == "all_carrot":
         return p.win_conditions_all_carrot.format(
             num_players=config.num_players, all_carrot_rules=all_carrot_rules
         )
@@ -442,9 +469,10 @@ def render_system_prompt(config: GameConfig, player_name: str) -> str:
 
 def render_strategy_hint(config: GameConfig) -> str:
     p = config.prompts
-    if config.uncertainty:
+    variant = prompt_variant(config)
+    if variant == "uncertain":
         return p.strategy_hint_uncertain
-    if config.include_parsnip:
+    if variant == "normal":
         single = config.parsnip.count == 1
         return p.strategy_hint_normal.format(
             parsnip_word=parsnip_word(config),
@@ -456,9 +484,10 @@ def render_strategy_hint(config: GameConfig) -> str:
 def render_vote_context(config: GameConfig) -> str:
     p = config.prompts
     intro = p.vote_intro.format(ejection_threshold=config.ejection_threshold)
-    if config.uncertainty:
+    variant = prompt_variant(config)
+    if variant == "uncertain":
         template = p.vote_context_uncertain
-    elif config.include_parsnip:
+    elif variant == "normal":
         template = p.vote_context_normal
     else:
         template = p.vote_context_all_carrot

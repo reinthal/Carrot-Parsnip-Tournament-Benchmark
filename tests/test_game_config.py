@@ -195,6 +195,26 @@ def test_make_game_deals_configured_roles():
     assert [p.role for p in again.players] == roles
 
 
+def test_all_carrot_standard_prompts_verbatim():
+    """all_carrot_prompts: standard — every prompt a player sees equals the
+    standard game's, only the roster is all Carrots."""
+    std = GameConfig.from_dict({"carrot": {"count": 2}, "parsnip": {"count": 1}})
+    ctl = GameConfig.from_dict({"carrot": {"count": 2}, "parsnip": {"count": 1},
+                                "include_parsnip": False, "all_carrot_prompts": "standard"})
+    for name in std.names():
+        assert render_system_prompt(ctl, name) == render_system_prompt(std, name)
+    assert render_strategy_hint(ctl) == render_strategy_hint(std)
+    assert render_vote_context(ctl) == render_vote_context(std)
+    assert all(p.role == Role.CARROT for p in make_game(ctl, seed=0).players)
+    with pytest.raises(ValueError):
+        GameConfig.from_dict({"all_carrot_prompts": "standard"})  # include_parsnip still true
+    with pytest.raises(ValueError):
+        GameConfig.from_dict({"include_parsnip": False, "uncertainty": True,
+                              "all_carrot_prompts": "standard"})
+    with pytest.raises(ValueError):
+        GameConfig.from_dict({"include_parsnip": False, "all_carrot_prompts": "verbatim"})
+
+
 def test_make_game_all_carrot_control():
     cfg = GameConfig.from_dict({"include_parsnip": False})
     game = make_game(cfg, seed=0)

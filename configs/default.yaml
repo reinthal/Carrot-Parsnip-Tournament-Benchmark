@@ -18,6 +18,7 @@ parsnip:
 player_names: null         # null -> Alice, Bob, Charlie, ... (count derived from roles)
 ejection_threshold: 2      # votes needed to eliminate
 include_parsnip: true      # false -> all-Carrot control game
+all_carrot_prompts: all_carrot  # all-Carrot games: "all_carrot" (players told) | "standard" (normal prompts verbatim)
 uncertainty: false         # true -> players not told which variant they are in
 draws_enabled: false       # true -> nobody-eliminated games count as draws
 discussion: true
