@@ -418,6 +418,15 @@ def CarrotParsnipOrchestrator(
                         require_exposed_reasoning(
                             state.output, model_name_for_player(player_index) or config.eval_model
                         )
+                        if (
+                            state.output.stop_reason == "max_tokens"
+                            and not state.output.message.tool_calls
+                        ):
+                            # The thinking ran out of budget before any action:
+                            # that is not a choice to stay silent. Sample the
+                            # turn again (same prompt); silence only if every
+                            # attempt is cut off.
+                            continue
                     messages.append(state.output.message)
 
                     if not state.output.message.tool_calls:
@@ -518,6 +527,8 @@ def CarrotParsnipOrchestrator(
                 require_exposed_reasoning(
                     state.output, model_name_for_player(player_index) or config.eval_model
                 )
+                if state.output.stop_reason == "max_tokens" and not state.output.message.tool_calls:
+                    continue  # thinking cut off before the vote: sample the turn again
             messages.append(state.output.message)
 
             if state.output.message.tool_calls:
