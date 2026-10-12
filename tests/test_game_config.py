@@ -19,7 +19,9 @@ from game_config import (
     PromptConfig,
     RoleConfig,
     make_game,
+    render_discussion_prompt,
     render_strategy_hint,
+    render_vote_prompt,
     render_system_prompt,
     render_vote_context,
 )
@@ -213,6 +215,33 @@ def test_all_carrot_standard_prompts_verbatim():
                               "all_carrot_prompts": "standard"})
     with pytest.raises(ValueError):
         GameConfig.from_dict({"include_parsnip": False, "all_carrot_prompts": "verbatim"})
+
+
+def test_turn_mode_prompts():
+    fields = dict(game_state="GS", context="", round=1, num_rounds=3, speaking_order="SO", announcements="")
+    two = GameConfig()
+    one = GameConfig.from_dict({"turn_mode": "single_call"})
+    base = render_discussion_prompt(two, **fields)
+    assert render_discussion_prompt(one, **fields) == base + "\n\n" + one.prompts.discussion_single_call_action
+    vfields = dict(game_state="GS", announcements="", strategy_hint="")
+    assert render_vote_prompt(one, **vfields) == render_vote_prompt(two, **vfields) + "\n\n" + one.prompts.vote_single_call_action
+    with pytest.raises(ValueError):
+        GameConfig.from_dict({"turn_mode": "one_call"})
+
+
+def test_require_exposed_reasoning():
+    from types import SimpleNamespace
+    from inspect_ai.model import ContentReasoning, ContentText
+    from Carrot_Parsnip_Agents import ReasoningNotExposedError, require_exposed_reasoning
+
+    def out(content):
+        return SimpleNamespace(message=SimpleNamespace(content=content), stop_reason="stop")
+
+    require_exposed_reasoning(out([ContentReasoning(reasoning="thinking"), ContentText(text="x")]), "m")
+    for bad in ("plain text", [ContentText(text="x")], [ContentReasoning(reasoning="  ")],
+                [ContentReasoning(reasoning="t", redacted=True)]):
+        with pytest.raises(ReasoningNotExposedError):
+            require_exposed_reasoning(out(bad), "m")
 
 
 def test_make_game_all_carrot_control():

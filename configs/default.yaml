@@ -19,6 +19,7 @@ player_names: null         # null -> Alice, Bob, Charlie, ... (count derived fro
 ejection_threshold: 2      # votes needed to eliminate
 include_parsnip: true      # false -> all-Carrot control game
 all_carrot_prompts: all_carrot  # all-Carrot games: "all_carrot" (players told) | "standard" (normal prompts verbatim)
+turn_mode: two_call        # "two_call" (explicit reasoning reply, then act) | "single_call" (reason in hidden thinking, act in the same response)
 uncertainty: false         # true -> players not told which variant they are in
 draws_enabled: false       # true -> nobody-eliminated games count as draws
 discussion: true

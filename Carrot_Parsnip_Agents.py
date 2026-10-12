@@ -20,6 +20,7 @@ from inspect_ai.model import (
     ChatMessageAssistant,
     ChatMessageSystem,
     ChatMessageUser,
+    ContentReasoning,
     GenerateConfig,
     execute_tools,
     get_model,
@@ -35,9 +36,11 @@ from game_config import (
     GameConfig,
     _count,
     make_game,
+    render_discussion_prompt,
     render_strategy_hint,
     render_system_prompt,
     render_vote_context,
+    render_vote_prompt,
 )
 
 
@@ -56,6 +59,32 @@ gpt_6_sol = "openrouter/openai/gpt-6-sol"
 # explicit reasoning step. These models reject reasoning_enabled=False
 # ("Reasoning is mandatory for this endpoint"), so they get minimal effort.
 REASONING_MANDATORY_MODELS = {glm_5_3_flashx, gemini_3_8_flash, grok_4_7, opus_5_5}
+
+
+class ReasoningNotExposedError(RuntimeError):
+    """turn_mode=single_call needs the provider to return the model's own
+    reasoning (vLLM with a reasoning parser, OpenRouter with reasoning on, a
+    thinking-enabled Anthropic model). Raised, not worked around: without it
+    a single-call turn has no reasoning at all."""
+
+
+def require_exposed_reasoning(output, model_name: str) -> None:
+    """Raise :class:`ReasoningNotExposedError` unless ``output`` carries a
+    non-empty, non-redacted reasoning block."""
+    content = output.message.content
+    blocks = [c for c in content if isinstance(c, ContentReasoning)] if isinstance(content, list) else []
+    if not blocks:
+        raise ReasoningNotExposedError(
+            f"turn_mode='single_call' but {model_name} returned no reasoning block "
+            f"(stop_reason={output.stop_reason!r}); the provider must expose the "
+            "model's chain of thought, e.g. vLLM with --reasoning-parser or "
+            "OpenRouter with reasoning enabled"
+        )
+    if any(b.redacted for b in blocks) or not any(b.reasoning.strip() for b in blocks):
+        raise ReasoningNotExposedError(
+            f"turn_mode='single_call' but {model_name} returned a redacted or empty "
+            "reasoning block; the provider must expose the model's chain of thought verbatim"
+        )
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "configs" / "default.yaml"
 
@@ -262,6 +291,11 @@ def CarrotParsnipOrchestrator(
 
     def model_for_player(player_index: int):
         model_name = model_name_for_player(player_index) or config.eval_model
+        if config.turn_mode == "single_call":
+            # the model reasons in its own thinking channel and acts in the
+            # same response; hidden reasoning stays enabled
+            return get_model(model_name, config=GenerateConfig(
+                max_tokens=config.max_tokens, reasoning_history="none"))
         if model_name in REASONING_MANDATORY_MODELS:
             gen_config = GenerateConfig(
                 max_tokens=config.max_tokens, reasoning_history="none", reasoning_effort="minimal"
@@ -351,7 +385,8 @@ def CarrotParsnipOrchestrator(
                 )
 
                 reasoning_prompt = ChatMessageUser(
-                    content=config.prompts.discussion_reasoning_prompt.format(
+                    content=render_discussion_prompt(
+                        config,
                         game_state=game_state_text,
                         context=context,
                         round=round_num,
@@ -364,20 +399,25 @@ def CarrotParsnipOrchestrator(
                 messages = [system_msg, reasoning_prompt]
 
                 player_model = model_for_player(player_index)
-                state.output = await player_model.generate(
-                    input=messages, tools=[], tool_choice="none"
-                )
-                messages.append(state.output.message)
+                if config.turn_mode == "two_call":
+                    state.output = await player_model.generate(
+                        input=messages, tools=[], tool_choice="none"
+                    )
+                    messages.append(state.output.message)
 
-                announcement_prompt = ChatMessageUser(
-                    content=config.prompts.announcement_prompt,
-                )
-                messages.append(announcement_prompt)
+                    announcement_prompt = ChatMessageUser(
+                        content=config.prompts.announcement_prompt,
+                    )
+                    messages.append(announcement_prompt)
 
                 for _attempt in range(3):
                     state.output = await player_model.generate(
                         input=messages, tools=tools, tool_choice="auto"
                     )
+                    if config.turn_mode == "single_call":
+                        require_exposed_reasoning(
+                            state.output, model_name_for_player(player_index) or config.eval_model
+                        )
                     messages.append(state.output.message)
 
                     if not state.output.message.tool_calls:
@@ -448,7 +488,8 @@ def CarrotParsnipOrchestrator(
         )
 
         reasoning_prompt = ChatMessageUser(
-            content=config.prompts.vote_reasoning_prompt.format(
+            content=render_vote_prompt(
+                config,
                 game_state=game_state_text,
                 announcements=announcements_text,
                 strategy_hint=render_strategy_hint(config),
@@ -458,20 +499,25 @@ def CarrotParsnipOrchestrator(
         messages = [system_msg, reasoning_prompt]
 
         player_model = model_for_player(player_index)
-        state.output = await player_model.generate(
-            input=messages, tools=[], tool_choice="none"
-        )
-        messages.append(state.output.message)
+        if config.turn_mode == "two_call":
+            state.output = await player_model.generate(
+                input=messages, tools=[], tool_choice="none"
+            )
+            messages.append(state.output.message)
 
-        vote_prompt = ChatMessageUser(
-            content=config.prompts.vote_prompt,
-        )
-        messages.append(vote_prompt)
+            vote_prompt = ChatMessageUser(
+                content=config.prompts.vote_prompt,
+            )
+            messages.append(vote_prompt)
 
         for _attempt in range(3):
             state.output = await player_model.generate(
                 input=messages, tools=tools, tool_choice="auto"
             )
+            if config.turn_mode == "single_call":
+                require_exposed_reasoning(
+                    state.output, model_name_for_player(player_index) or config.eval_model
+                )
             messages.append(state.output.message)
 
             if state.output.message.tool_calls:

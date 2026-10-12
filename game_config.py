@@ -183,6 +183,13 @@ class PromptConfig:
         "announcement. Use the MakeAnnouncementTool to speak, or "
         "respond without using the tool to stay silent."
     )
+    # turn_mode: single_call — appended to the reasoning prompt; the model
+    # reasons in its own thinking and acts in the same response
+    discussion_single_call_action: str = (
+        "Reason privately first. Then, in this same response, either use the "
+        "MakeAnnouncementTool to make your public announcement, or respond "
+        "without using the tool to stay silent."
+    )
 
     vote_reasoning_prompt: str = (
         "Here is the current game state from your perspective:\n\n"
@@ -210,6 +217,10 @@ class PromptConfig:
     )
     vote_prompt: str = (
         "Based on your reasoning above, now use the "
+        "CastEliminationVoteTool to cast your vote."
+    )
+    vote_single_call_action: str = (
+        "Reason privately first. Then, in this same response, use the "
         "CastEliminationVoteTool to cast your vote."
     )
 
@@ -244,6 +255,12 @@ class GameConfig:
     # there is no Parsnip; "standard" shows the normal-game prompts verbatim, so
     # an all-Carrot control game reads exactly like a standard one.
     all_carrot_prompts: str = "all_carrot"
+    # How a player's turn is driven: "two_call" = an explicit reasoning reply
+    # (no tools) followed by a second call that acts; "single_call" = one call
+    # with the tools attached, the model reasons in its own hidden thinking
+    # (models with a native reasoning channel, e.g. Qwen) and acts in the same
+    # response. single_call keeps the reasoning out of the visible context.
+    turn_mode: str = "two_call"
     draws_enabled: bool = False
     discussion: bool = True
     num_rounds_discussion: int = 1
@@ -277,6 +294,8 @@ class GameConfig:
             raise ValueError(
                 "all_carrot_prompts='standard' requires include_parsnip=false and uncertainty=false"
             )
+        if self.turn_mode not in ("two_call", "single_call"):
+            raise ValueError(f"turn_mode must be 'two_call' or 'single_call', got {self.turn_mode!r}")
         if not 1 <= self.ejection_threshold <= self.num_players:
             raise ValueError(
                 f"ejection_threshold must be between 1 and {self.num_players}, got {self.ejection_threshold}"
@@ -479,6 +498,23 @@ def render_strategy_hint(config: GameConfig) -> str:
             who="Who might it be" if single else "Who might they be",
         )
     return p.strategy_hint_all_carrot
+
+
+def render_discussion_prompt(config: GameConfig, **fields: str) -> str:
+    """The user prompt of a discussion turn: the reasoning prompt, plus the
+    act-in-the-same-response instruction in ``single_call`` mode."""
+    text = config.prompts.discussion_reasoning_prompt.format(**fields)
+    if config.turn_mode == "single_call":
+        text += "\n\n" + config.prompts.discussion_single_call_action
+    return text
+
+
+def render_vote_prompt(config: GameConfig, **fields: str) -> str:
+    """The user prompt of a vote turn (see :func:`render_discussion_prompt`)."""
+    text = config.prompts.vote_reasoning_prompt.format(**fields)
+    if config.turn_mode == "single_call":
+        text += "\n\n" + config.prompts.vote_single_call_action
+    return text
 
 
 def render_vote_context(config: GameConfig) -> str:
