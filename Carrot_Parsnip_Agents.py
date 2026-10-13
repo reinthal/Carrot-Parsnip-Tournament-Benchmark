@@ -427,6 +427,8 @@ def CarrotParsnipOrchestrator(
                             # turn again (same prompt); silence only if every
                             # attempt is cut off.
                             continue
+                        if config.single_call_resample_silent and not state.output.message.tool_calls:
+                            continue
                     messages.append(state.output.message)
 
                     if not state.output.message.tool_calls:

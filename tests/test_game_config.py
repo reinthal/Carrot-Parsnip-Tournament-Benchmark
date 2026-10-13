@@ -270,3 +270,10 @@ def test_engine_legacy_path_unchanged():
         CarrotParsnipGame(["A", "B", "C", "D"], num_carrot=2, num_parsnip=1)
     with pytest.raises(ValueError, match="or neither"):
         CarrotParsnipGame(["A", "B", "C"], num_carrot=2)
+
+
+def test_single_call_resample_silent_requires_single_call():
+    assert GameConfig.from_dict({"turn_mode": "single_call",
+                                 "single_call_resample_silent": True}).single_call_resample_silent
+    with pytest.raises(ValueError):
+        GameConfig.from_dict({"single_call_resample_silent": True})

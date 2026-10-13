@@ -261,6 +261,11 @@ class GameConfig:
     # (models with a native reasoning channel, e.g. Qwen) and acts in the same
     # response. single_call keeps the reasoning out of the visible context.
     turn_mode: str = "two_call"
+    # single_call only: a discussion turn that comes back without a tool call
+    # is sampled again (same prompt, within the 3 attempts) instead of being
+    # recorded as silence; the player is silent only if every attempt is.
+    # For models that write their deliberation as visible text and stop.
+    single_call_resample_silent: bool = False
     draws_enabled: bool = False
     discussion: bool = True
     num_rounds_discussion: int = 1
@@ -296,6 +301,8 @@ class GameConfig:
             )
         if self.turn_mode not in ("two_call", "single_call"):
             raise ValueError(f"turn_mode must be 'two_call' or 'single_call', got {self.turn_mode!r}")
+        if self.single_call_resample_silent and self.turn_mode != "single_call":
+            raise ValueError("single_call_resample_silent requires turn_mode: single_call")
         if not 1 <= self.ejection_threshold <= self.num_players:
             raise ValueError(
                 f"ejection_threshold must be between 1 and {self.num_players}, got {self.ejection_threshold}"
