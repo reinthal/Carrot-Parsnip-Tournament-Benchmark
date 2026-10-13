@@ -273,6 +273,9 @@ class GameConfig:
     max_tokens: int = 4000
     message_limit: int = 200
     max_concurrent_games: int = 100
+    # concurrent requests per model API; None keeps Inspect's default (10),
+    # which caps throughput well below max_concurrent_games on a fast server
+    max_connections: Optional[int] = None
     prompts: PromptConfig = field(default_factory=PromptConfig)
 
     def __post_init__(self):

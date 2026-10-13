@@ -734,7 +734,8 @@ def _make_game_task(name: str, seed: int, result_out: dict, config: GameConfig) 
     )
 
 
-def _run_tasks(tasks: list[Task], max_concurrent: int) -> tuple[list, dict]:
+def _run_tasks(tasks: list[Task], max_concurrent: int,
+               max_connections: Optional[int] = None) -> tuple[list, dict]:
     """
     Run *tasks* with up to *max_concurrent* games in flight at once.
 
@@ -749,7 +750,8 @@ def _run_tasks(tasks: list[Task], max_concurrent: int) -> tuple[list, dict]:
     usage_before = _credits_before[0] if _credits_before else None
 
     eval_logs = eval(
-        tasks, log_dir=log_dir, max_tasks=max_concurrent
+        tasks, log_dir=log_dir, max_tasks=max_concurrent,
+        max_connections=max_connections,  # None: Inspect's default (10 per model)
     )
 
     _credits_after = get_openrouter_credits()
@@ -1065,7 +1067,7 @@ def run_games(
         for i in range(num_games)
     ]
 
-    eval_logs, cost_info = _run_tasks(tasks, max_concurrent)
+    eval_logs, cost_info = _run_tasks(tasks, max_concurrent, config.max_connections)
 
     # Inspect catches Ctrl+C itself and returns "cancelled" logs instead of
     # raising, so re-raise here to let callers stop.
