@@ -366,14 +366,16 @@ def CarrotParsnipOrchestrator(
 
     role_configs = {Role.CARROT: config.carrot, Role.PARSNIP: config.parsnip, Role.TURNIP: config.turnip}
 
-    def model_for_player(player_index: int, max_tokens: Optional[int] = None):
+    def model_for_player(player_index: int, max_tokens: Optional[int] = None,
+                         reasoning_effort: Optional[str] = None):
         model_name = model_name_for_player(player_index) or config.eval_model
         if config.turn_mode == "single_call":
             # the model reasons in its own thinking channel and acts in the
             # same response; hidden reasoning stays enabled
-            effort = role_configs[game.players[player_index].role].reasoning_effort
+            role_cfg = role_configs[game.players[player_index].role]
+            effort = reasoning_effort or role_cfg.reasoning_effort
             return get_model(model_name, config=GenerateConfig(
-                max_tokens=max_tokens or config.max_tokens, reasoning_history="none",
+                max_tokens=max_tokens or role_cfg.max_tokens or config.max_tokens, reasoning_history="none",
                 reasoning_effort=effort))
         if model_name in REASONING_MANDATORY_MODELS:
             gen_config = GenerateConfig(
@@ -420,14 +422,14 @@ def CarrotParsnipOrchestrator(
 
     async def required_tool_turn(
         player_index: int, messages: list, tools: list[Tool], tool_name: str,
-        done_prefix: str, max_tokens: Optional[int] = None,
+        done_prefix: str, max_tokens: Optional[int] = None, reasoning_effort: Optional[str] = None,
     ):
         """One single_call turn that must end in exactly one successful call
         of ``tool_name``. A failed attempt (thinking cut off, no or several
         tool calls, a rejected call) is re-sampled from the SAME messages, so
         the successful call's input is always ``messages``; after 3 failed
         attempts the game fails (an excluded game, not a silent turn)."""
-        player_model = model_for_player(player_index, max_tokens)
+        player_model = model_for_player(player_index, max_tokens, reasoning_effort)
         model_name = model_name_for_player(player_index) or config.eval_model
         failures = []
         for attempt in range(1, 4):
@@ -499,6 +501,7 @@ def CarrotParsnipOrchestrator(
             output, result, attempts = await required_tool_turn(
                 target, answer_messages, answer_tools, "AnswerQuestionTool",
                 "Your answer has been given", max_tokens=ic.thinking_budget + ic.answer_max_tokens,
+                reasoning_effort=ic.answer_reasoning_effort,
             )
             answer = qa["answer"]
             announcements_store["messages"].append({

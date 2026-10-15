@@ -55,6 +55,7 @@ class RoleConfig:
     private_knowledge_multi: Optional[str] = None  # count > 1 variant; {count} placeholder;
                                                    # None -> same as private_knowledge
     reasoning_effort: Optional[str] = None  # GenerateConfig.reasoning_effort for this role's seats
+    max_tokens: Optional[int] = None        # per-turn token cap for this role's seats (None -> GameConfig.max_tokens)
                                             # (e.g. a provider that only exposes reasoning when set)
 
     def __post_init__(self):
@@ -114,6 +115,8 @@ class InterrogationConfig:
     exchanges: int = 3
     answer_max_tokens: int = 200      # asked for in the prompt; the answer is not cut
     thinking_budget: int = 1000       # an answer turn's max_tokens = thinking_budget + answer_max_tokens
+    answer_reasoning_effort: Optional[str] = None   # GenerateConfig.reasoning_effort on answer turns only
+                                                    # (None: the answering role's own reasoning_effort)
     detector: str = "off"
 
     def __post_init__(self):
