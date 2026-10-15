@@ -9,7 +9,7 @@ from collections import Counter
 from itertools import combinations_with_replacement
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Awaitable, Callable, Optional
 
 import requests
 
@@ -25,7 +25,8 @@ from inspect_ai.model import (
     execute_tools,
     get_model,
 )
-from inspect_ai.tool import tool, Tool
+from inspect_ai.model._openai import openai_chat_tools
+from inspect_ai.tool import tool, Tool, ToolDef, ToolInfo
 
 _script_dir = str(Path(__file__).resolve().parent)
 if _script_dir not in sys.path:
@@ -37,6 +38,7 @@ from game_config import (
     _count,
     make_game,
     render_discussion_prompt,
+    render_turnip_lines,
     render_strategy_hint,
     render_system_prompt,
     render_vote_context,
@@ -166,9 +168,65 @@ def MakeAnnouncementTool(game: CarrotParsnipGame, player_index: int, announcemen
             "player_index": player_index,
             "message": message,
             "context": announcements.get("current_context", ""),
+            "round": announcements.get("current_round"),
+            "kind": "announcement",
         })
         return f'Your announcement has been made public: "{message}"'
     return execute
+
+
+@tool
+def AskQuestionTool(game: CarrotParsnipGame, qa: dict):
+    async def execute(target_index: int, question: str) -> str:
+        """
+        Ask one public question to the player you are interrogating.
+
+        Args:
+            target_index: The player index of the player you are questioning.
+            question: Your question.
+
+        Returns:
+            str: Confirmation that your question was asked.
+        """
+        if target_index not in qa["options"]:
+            return f"Error: target_index must be one of {qa['options']}."
+        if qa["target"] is not None and target_index != qa["target"]:
+            return (f"Error: you are questioning {game.players[qa['target']].name} this round "
+                    f"(target_index {qa['target']}).")
+        if not question.strip():
+            return "Error: the question is empty."
+        qa["pending"] = {"target": target_index, "question": question}
+        return f'Your question to {game.players[target_index].name} has been asked: "{question}"'
+    return execute
+
+
+@tool
+def AnswerQuestionTool(qa: dict):
+    async def execute(answer: str) -> str:
+        """
+        Answer the Turnip's question. Your answer is public.
+
+        Args:
+            answer: Your answer.
+
+        Returns:
+            str: Confirmation that your answer was given.
+        """
+        if not answer.strip():
+            return "Error: the answer is empty."
+        qa["answer"] = answer
+        return f'Your answer has been given: "{answer}"'
+    return execute
+
+
+def tool_schemas(tools: list[Tool]) -> list[dict]:
+    """The tools in the OpenAI chat format the providers send (what the
+    chat template renders into the system prompt)."""
+    infos = []
+    for t in tools:
+        d = ToolDef(t)
+        infos.append(ToolInfo(name=d.name, description=d.description, parameters=d.parameters))
+    return [dict(x) for x in openai_chat_tools(infos)]
 
 
 # ── Tool Factory ─────────────────────────────────────────────────────────
@@ -207,6 +265,7 @@ def CarrotParsnipOrchestrator(
     seed: Optional[int] = None,
     result_out: Optional[dict] = None,
     config: Optional[GameConfig] = None,
+    detector: Optional[Callable[[dict], Awaitable[dict]]] = None,
 ):
     """
     Top-level agent that runs a full Carrot-Parsnip game of LLM players.
@@ -225,6 +284,13 @@ def CarrotParsnipOrchestrator(
             discussion rounds, and every prompt template. ``None`` uses
             the defaults (``GameConfig()``). Load one from YAML with
             ``GameConfig.from_yaml(path)``.
+        detector: Turnip games with ``interrogation.detector`` "silent" or
+            "shown" only: an async callable scoring one answer to the
+            Turnip. It gets the answer record (the answering call's input
+            messages, tool schemas, tool call and result, plus round /
+            exchange / target / question / answer) and returns a dict with
+            a dict stored with the record; with "shown" it must hold
+            ``flag`` (bool), which the Turnip then sees privately.
     """
     config = config or GameConfig()
     names = config.names()
@@ -239,6 +305,13 @@ def CarrotParsnipOrchestrator(
     carrot_models = config.carrot.models
     game = make_game(config, seed=seed)
     game.start()
+    turnip = game.turnip
+    turnip_name = turnip.name if turnip is not None else None
+    if turnip is not None and config.interrogation.detector != "off" and detector is None:
+        raise ValueError(f"interrogation.detector={config.interrogation.detector!r} needs a detector callable")
+    if (turnip is None or config.interrogation.detector == "off") and detector is not None:
+        raise ValueError("a detector was passed but interrogation.detector is 'off' (or no Turnip plays)")
+    qa_records: list[dict] = []
 
     announcements_store: dict = {"messages": []}
 
@@ -281,6 +354,8 @@ def CarrotParsnipOrchestrator(
         if _parsnip_model_player is not None and player_index == _parsnip_model_player:
             return parsnip_model
         role = game.players[player_index].role
+        if role == Role.TURNIP:
+            return config.turnip.model
         if role == Role.PARSNIP and parsnip_model is not None:
             return parsnip_model
         if player_index in _carrot_seat_models:
@@ -289,13 +364,17 @@ def CarrotParsnipOrchestrator(
             return carrot_model
         return None
 
-    def model_for_player(player_index: int):
+    role_configs = {Role.CARROT: config.carrot, Role.PARSNIP: config.parsnip, Role.TURNIP: config.turnip}
+
+    def model_for_player(player_index: int, max_tokens: Optional[int] = None):
         model_name = model_name_for_player(player_index) or config.eval_model
         if config.turn_mode == "single_call":
             # the model reasons in its own thinking channel and acts in the
             # same response; hidden reasoning stays enabled
+            effort = role_configs[game.players[player_index].role].reasoning_effort
             return get_model(model_name, config=GenerateConfig(
-                max_tokens=config.max_tokens, reasoning_history="none"))
+                max_tokens=max_tokens or config.max_tokens, reasoning_history="none",
+                reasoning_effort=effort))
         if model_name in REASONING_MANDATORY_MODELS:
             gen_config = GenerateConfig(
                 max_tokens=config.max_tokens, reasoning_history="none", reasoning_effort="minimal"
@@ -327,6 +406,137 @@ def CarrotParsnipOrchestrator(
                 lines.append(f'  {msg["player"]}: "{msg["message"]}"')
         return "\n".join(lines)
 
+    # ------------------------------------------------------------------
+    # Interrogation (Turnip games): after every discussion round
+    # ------------------------------------------------------------------
+
+    def phase_state_text(player_index: int, phase_line: str) -> str:
+        """The player's state view with CURRENT PHASE replaced (as in discussion)."""
+        return re.sub(
+            r"CURRENT PHASE\n(?:  .+\n?)+",
+            f"CURRENT PHASE\n  {phase_line}\n",
+            game.get_state_summary(player_index),
+        )
+
+    async def required_tool_turn(
+        player_index: int, messages: list, tools: list[Tool], tool_name: str,
+        done_prefix: str, max_tokens: Optional[int] = None,
+    ):
+        """One single_call turn that must end in exactly one successful call
+        of ``tool_name``. A failed attempt (thinking cut off, no or several
+        tool calls, a rejected call) is re-sampled from the SAME messages, so
+        the successful call's input is always ``messages``; after 3 failed
+        attempts the game fails (an excluded game, not a silent turn)."""
+        player_model = model_for_player(player_index, max_tokens)
+        model_name = model_name_for_player(player_index) or config.eval_model
+        failures = []
+        for attempt in range(1, 4):
+            output = await player_model.generate(input=messages, tools=tools, tool_choice="auto")
+            require_exposed_reasoning(output, model_name)
+            calls = output.message.tool_calls or []
+            if len(calls) != 1 or calls[0].function != tool_name:
+                failures.append(f"{len(calls)} tool calls ({output.stop_reason})")
+                continue
+            tool_messages, _ = await execute_tools([*messages, output.message], tools=tools)
+            result = tool_messages[-1].content if tool_messages else ""
+            if isinstance(result, str) and result.startswith(done_prefix):
+                return output, result, attempt
+            failures.append(f"rejected: {str(result)[:120]}")
+        raise RuntimeError(
+            f"{game.players[player_index].name}: no successful {tool_name} in 3 attempts: {failures}"
+        )
+
+    async def run_interrogation(state: AgentState, round_num: int) -> AgentState:
+        p = config.prompts
+        ic = config.interrogation
+        options = [pl.index for pl in game.players if pl.index != turnip.index]
+        qa: dict = {"options": options, "target": None}
+        ask_tools = [AskQuestionTool(game, qa)]
+        answer_tools = [AnswerQuestionTool(qa)]
+        context = p.qa_context.format(round=round_num)
+        for exchange in range(1, ic.exchanges + 1):
+            phase_line = (f"Interrogation after discussion round {round_num}/{num_rounds_discussion}, "
+                          f"question {exchange}/{ic.exchanges}.")
+            if qa["target"] is None:
+                task = p.turnip_choose_task.format(
+                    options=", ".join(f"{game.players[i].name} (index {i})" for i in options))
+            else:
+                task = p.turnip_continue_task.format(
+                    target=f"{game.players[qa['target']].name} (index {qa['target']})")
+            ask_messages = [
+                ChatMessageSystem(content=render_system_prompt(config, turnip.name, turnip_name)),
+                ChatMessageUser(content=p.turnip_question_prompt.format(
+                    game_state=phase_state_text(turnip.index, phase_line),
+                    announcements=get_recent_announcements(),
+                    round=round_num, num_rounds=num_rounds_discussion,
+                    exchange=exchange, exchanges=ic.exchanges, task=task,
+                )),
+            ]
+            qa["pending"] = None
+            await required_tool_turn(turnip.index, ask_messages, ask_tools, "AskQuestionTool",
+                                     "Your question to")
+            target, question = qa["pending"]["target"], qa["pending"]["question"]
+            qa["target"] = target
+            target_player = game.players[target]
+            announcements_store["messages"].append({
+                "player": p.qa_question_label.format(turnip_name=turnip.name, target=target_player.name),
+                "player_index": turnip.index, "message": question, "context": context,
+                "round": round_num, "kind": "question", "exchange": exchange,
+            })
+
+            answer_messages = [
+                ChatMessageSystem(content=render_system_prompt(config, target_player.name, turnip_name)),
+                ChatMessageUser(content=p.answer_prompt.format(
+                    game_state=phase_state_text(target, phase_line),
+                    announcements=get_recent_announcements(),
+                    round=round_num, num_rounds=num_rounds_discussion,
+                    exchange=exchange, exchanges=ic.exchanges,
+                    turnip_name=turnip.name, question=question,
+                    answer_max_tokens=ic.answer_max_tokens,
+                )),
+            ]
+            qa["answer"] = None
+            output, result, attempts = await required_tool_turn(
+                target, answer_messages, answer_tools, "AnswerQuestionTool",
+                "Your answer has been given", max_tokens=ic.thinking_budget + ic.answer_max_tokens,
+            )
+            answer = qa["answer"]
+            announcements_store["messages"].append({
+                "player": p.qa_answer_label.format(target=target_player.name),
+                "player_index": target, "message": answer, "context": context,
+                "round": round_num, "kind": "answer", "exchange": exchange,
+            })
+            (call,) = output.message.tool_calls
+            content = output.message.content
+            record = {
+                "round": round_num, "exchange": exchange, "turnip": turnip.name,
+                "target": target_player.name, "target_role": target_player.role.value,
+                "question": question, "answer": answer, "attempts": attempts,
+                # the answering call exactly as the model saw it (the probe's input)
+                "input_messages": [{"role": m.role, "content": m.text} for m in answer_messages],
+                "tools": tool_schemas(answer_tools),
+                "reasoning": "\n".join(c.reasoning for c in content if isinstance(c, ContentReasoning))
+                if isinstance(content, list) else "",
+                "acting_text": output.message.text,
+                "tool_call": {"name": call.function, "arguments": dict(call.arguments)},
+                "tool_result": result,
+                "stop_reason": output.stop_reason,
+                "output_tokens": output.usage.output_tokens if output.usage else None,
+                "reasoning_tokens": output.usage.reasoning_tokens if output.usage else None,
+            }
+            if detector is not None:
+                verdict = await detector(record)
+                record["detector"] = verdict
+                if ic.detector == "shown":
+                    if not isinstance(verdict.get("flag"), bool):
+                        raise TypeError(f"detector must return a bool 'flag', got {verdict!r}")
+                    game.private_knowledge[turnip.index].append(p.detector_note.format(
+                        round=round_num, exchange=exchange, target=target_player.name,
+                        verdict=p.detector_flagged if verdict["flag"] else p.detector_not_flagged,
+                    ))
+            qa_records.append(record)
+        return state
+
     async def run_group_discussion(
         state: AgentState,
         context: str,
@@ -338,6 +548,8 @@ def CarrotParsnipOrchestrator(
         last_speaker = None
         for round_num in range(1, num_rounds_discussion + 1):
             announcements_store["current_context"] = context_label
+            announcements_store["current_round"] = round_num
+            announcements_store.setdefault("orders", []).append(None)
 
             alive_players = list(range(n))
             random.shuffle(alive_players)
@@ -348,6 +560,7 @@ def CarrotParsnipOrchestrator(
                 alive_players[0], alive_players[swap_idx] = alive_players[swap_idx], alive_players[0]
 
             last_speaker = alive_players[-1]
+            announcements_store["orders"][-1] = [game.players[i].name for i in alive_players]
 
             for speaker_pos, player_index in enumerate(alive_players):
                 player = game.players[player_index]
@@ -381,7 +594,7 @@ def CarrotParsnipOrchestrator(
                 speaking_order_text = "Speaking order this round:\n" + "\n".join(order_lines)
 
                 system_msg = ChatMessageSystem(
-                    content=render_system_prompt(config, player.name)
+                    content=render_system_prompt(config, player.name, turnip_name)
                 )
 
                 reasoning_prompt = ChatMessageUser(
@@ -474,6 +687,9 @@ def CarrotParsnipOrchestrator(
                         )
                     )
 
+            if turnip is not None:
+                state = await run_interrogation(state, round_num)
+
         return state
 
     # ------------------------------------------------------------------
@@ -495,7 +711,7 @@ def CarrotParsnipOrchestrator(
                 announcements_text = f"\n\n{announcements_text}\n"
 
         system_msg = ChatMessageSystem(
-            content=render_system_prompt(config, player.name)
+            content=render_system_prompt(config, player.name, turnip_name)
         )
 
         reasoning_prompt = ChatMessageUser(
@@ -611,7 +827,7 @@ def CarrotParsnipOrchestrator(
                 target_idx = game.votes.get(p.index)
                 target = game.players[target_idx] if target_idx is not None else None
                 correct = None
-                if p.role == Role.CARROT and include_parsnip and target is not None:
+                if p.role in (Role.CARROT, Role.TURNIP) and include_parsnip and target is not None:
                     correct = target.role == Role.PARSNIP
                 votes.append({
                     "name": p.name,
@@ -622,6 +838,14 @@ def CarrotParsnipOrchestrator(
                     "correct": correct,
                 })
             result_out["votes"] = votes
+            result_out["roles"] = {p.name: p.role.value for p in game.players}
+            result_out["turnip"] = turnip_name
+            result_out["orders"] = announcements_store.get("orders", [])
+            result_out["announcements"] = [
+                {k: v for k, v in m.items() if k != "player_index"} | {"speaker": game.players[m["player_index"]].name}
+                for m in announcements_store.get("messages", [])
+            ]
+            result_out["qa"] = qa_records
 
             if game.phase != GamePhase.GAME_OVER:
                 # At least one player never cast a valid vote, so the game
@@ -722,13 +946,14 @@ def get_openrouter_credits() -> tuple[float, float | None] | None:
 # ── Batch Runner ─────────────────────────────────────────────────────────
 
 
-def _make_game_task(name: str, seed: int, result_out: dict, config: GameConfig) -> Task:
+def _make_game_task(name: str, seed: int, result_out: dict, config: GameConfig,
+                    detector: Optional[Callable[[dict], Awaitable[dict]]] = None) -> Task:
     """Build a single-sample Inspect task that plays one game."""
     return Task(
         name=name,
         dataset=[Sample(input="", target="")],
         solver=as_solver(
-            CarrotParsnipOrchestrator(seed=seed, result_out=result_out, config=config)
+            CarrotParsnipOrchestrator(seed=seed, result_out=result_out, config=config, detector=detector)
         ),
         message_limit=config.message_limit,
     )
@@ -1034,6 +1259,7 @@ def run_games(
     base_seed: int = 0,
     config: Optional[GameConfig] = None,
     max_concurrent: Optional[int] = None,
+    detector: Optional[Callable[[dict], Awaitable[dict]]] = None,
 ) -> dict:
     """
     Run *num_games* Carrot-Parsnip games and report statistics.
@@ -1046,6 +1272,8 @@ def run_games(
             load one from YAML with ``GameConfig.from_yaml(path)``.
         max_concurrent: Maximum number of games running at once
             (default ``config.max_concurrent_games``).
+        detector: Turnip games only — scores each answer to the Turnip
+            (see :func:`CarrotParsnipOrchestrator`).
 
     Returns:
         Dictionary with aggregated statistics and per-game results.
@@ -1063,6 +1291,7 @@ def run_games(
             seed=base_seed + i,
             result_out=result_holders[i],
             config=config,
+            detector=detector,
         )
         for i in range(num_games)
     ]

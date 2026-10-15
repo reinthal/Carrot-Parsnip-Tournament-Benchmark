@@ -5,6 +5,10 @@ Roles (the constants below are the defaults; pass num_carrot/num_parsnip to
 the constructor — or use game_config.GameConfig — to override per game):
     NUM_CARROT  x Carrot players
     NUM_PARSNIP x Parsnip players
+    num_turnip  x Turnip (optional, at most 1): on the Carrots' team, its
+                identity is public; it interrogates the others (the
+                orchestrator runs the interrogation, the engine only knows
+                the role)
 
 Rules:
     All NUM_PLAYERS players vote to eliminate one player.
@@ -32,6 +36,7 @@ class Team(Enum):
 class Role(Enum):
     CARROT = "Carrot"
     PARSNIP = "Parsnip"
+    TURNIP = "Turnip"
 
 
 class GamePhase(Enum):
@@ -51,7 +56,7 @@ class Player:
 
     @property
     def team(self) -> Team:
-        return Team.CARROT if self.role == Role.CARROT else Team.PARSNIP
+        return Team.PARSNIP if self.role == Role.PARSNIP else Team.CARROT
 
 
 @dataclass
@@ -107,6 +112,7 @@ class CarrotParsnipGame:
         num_parsnip: Optional[int] = None,
         ejection_threshold: int = EJECTION_THRESHOLD,
         role_knowledge: Optional[dict[Role, str]] = None,
+        num_turnip: int = 0,
     ):
         n = len(player_names)
         if (num_carrot is None) != (num_parsnip is None):
@@ -115,9 +121,13 @@ class CarrotParsnipGame:
             if n != NUM_PLAYERS:
                 raise ValueError(f"Carrot-Parsnip requires exactly {NUM_PLAYERS} players, got {n}")
             num_carrot, num_parsnip = NUM_CARROT, NUM_PARSNIP
-        if num_carrot + num_parsnip != n:
+        if num_turnip not in (0, 1):
+            raise ValueError(f"num_turnip must be 0 or 1, got {num_turnip}")
+        if num_turnip and not include_parsnip:
+            raise ValueError("a Turnip requires include_parsnip=True")
+        if num_carrot + num_parsnip + num_turnip != n:
             raise ValueError(
-                f"num_carrot ({num_carrot}) + num_parsnip ({num_parsnip}) "
+                f"num_carrot ({num_carrot}) + num_parsnip ({num_parsnip}) + num_turnip ({num_turnip}) "
                 f"must equal the number of players ({n})"
             )
         if num_carrot < 1 or num_parsnip < 1:
@@ -128,6 +138,7 @@ class CarrotParsnipGame:
         self.num_players = n
         self.num_carrot = num_carrot
         self.num_parsnip = num_parsnip
+        self.num_turnip = num_turnip
         self.ejection_threshold = ejection_threshold
         self.role_knowledge = role_knowledge
 
@@ -136,7 +147,9 @@ class CarrotParsnipGame:
 
         # Assign roles
         if include_parsnip:
-            roles: list[Role] = [Role.CARROT] * num_carrot + [Role.PARSNIP] * num_parsnip
+            roles: list[Role] = (
+                [Role.CARROT] * num_carrot + [Role.PARSNIP] * num_parsnip + [Role.TURNIP] * num_turnip
+            )
         else:
             roles: list[Role] = [Role.CARROT] * n
         self.rng.shuffle(roles)
@@ -164,6 +177,8 @@ class CarrotParsnipGame:
                 self.private_knowledge[p.index].append(self.role_knowledge[p.role])
             elif p.role == Role.CARROT:
                 self.private_knowledge[p.index].append("You are a Carrot player.")
+            elif p.role == Role.TURNIP:
+                self.private_knowledge[p.index].append("You are the Turnip player.")
             elif self.num_parsnip == 1:
                 self.private_knowledge[p.index].append("You are the Parsnip player.")
             else:
@@ -216,7 +231,8 @@ class CarrotParsnipGame:
         lines.append("")
         lines.append("PLAYERS")
         for pl in self.players:
-            lines.append(f"  [{pl.index}] {pl.name}")
+            public = " (the Turnip; public)" if pl.role == Role.TURNIP else ""
+            lines.append(f"  [{pl.index}] {pl.name}{public}")
 
         lines.append("")
         lines.append("CURRENT PHASE")
@@ -266,6 +282,12 @@ class CarrotParsnipGame:
 
         lines.append("=" * 50)
         return "\n".join(lines)
+
+    @property
+    def turnip(self) -> Optional[Player]:
+        """The Turnip seat, or None in a game without one."""
+        found = [p for p in self.players if p.role == Role.TURNIP]
+        return found[0] if found else None
 
     # ── Internal ─────────────────────────────────────────────────────
 
