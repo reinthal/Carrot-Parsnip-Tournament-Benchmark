@@ -61,6 +61,30 @@ gpt_6_sol = "openrouter/openai/gpt-6-sol"
 REASONING_MANDATORY_MODELS = {glm_5_3_flashx, gemini_3_8_flash, grok_4_7, opus_5_5}
 
 
+def player_model(model_name: str, config: GameConfig):
+    """The Inspect model a seat on ``model_name`` plays with."""
+    if model_name in config.model_profiles:
+        # the experiment's call settings for this model, exactly (see GameConfig.model_profiles)
+        profile = config.model_profiles[model_name]
+        return get_model(model_name, config=GenerateConfig(**profile["generate"]),
+                         base_url=profile["base_url"])
+    if config.turn_mode == "single_call":
+        # the model reasons in its own thinking channel and acts in the
+        # same response; hidden reasoning stays enabled
+        return get_model(model_name, config=GenerateConfig(
+            max_tokens=config.max_tokens, reasoning_history="none"))
+    if model_name in REASONING_MANDATORY_MODELS:
+        gen_config = GenerateConfig(
+            max_tokens=config.max_tokens, reasoning_history="none", reasoning_effort="minimal"
+        )
+        return get_model(model_name, config=gen_config)
+    gen_config = GenerateConfig(max_tokens=config.max_tokens, reasoning_history="none")
+    if model_name.startswith("openrouter/"):
+        # reasoning_enabled is an OpenRouter-specific model arg.
+        return get_model(model_name, config=gen_config, reasoning_enabled=False)
+    return get_model(model_name, config=gen_config)
+
+
 class ReasoningNotExposedError(RuntimeError):
     """turn_mode=single_call needs the provider to return the model's own
     reasoning (vLLM with a reasoning parser, OpenRouter with reasoning on, a
@@ -290,22 +314,7 @@ def CarrotParsnipOrchestrator(
         return None
 
     def model_for_player(player_index: int):
-        model_name = model_name_for_player(player_index) or config.eval_model
-        if config.turn_mode == "single_call":
-            # the model reasons in its own thinking channel and acts in the
-            # same response; hidden reasoning stays enabled
-            return get_model(model_name, config=GenerateConfig(
-                max_tokens=config.max_tokens, reasoning_history="none"))
-        if model_name in REASONING_MANDATORY_MODELS:
-            gen_config = GenerateConfig(
-                max_tokens=config.max_tokens, reasoning_history="none", reasoning_effort="minimal"
-            )
-            return get_model(model_name, config=gen_config)
-        gen_config = GenerateConfig(max_tokens=config.max_tokens, reasoning_history="none")
-        if model_name.startswith("openrouter/"):
-            # reasoning_enabled is an OpenRouter-specific model arg.
-            return get_model(model_name, config=gen_config, reasoning_enabled=False)
-        return get_model(model_name, config=gen_config)
+        return player_model(model_name_for_player(player_index) or config.eval_model, config)
 
     # ------------------------------------------------------------------
     # Announcement helpers
