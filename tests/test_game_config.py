@@ -277,3 +277,40 @@ def test_single_call_resample_silent_requires_single_call():
                                  "single_call_resample_silent": True}).single_call_resample_silent
     with pytest.raises(ValueError):
         GameConfig.from_dict({"single_call_resample_silent": True})
+
+
+# ── Model profiles (injected per-model call settings) ────────────────────
+
+PROFILE = {"base_url": "https://api.moonshot.ai/v1",
+           "generate": {"max_tokens": 262144, "reasoning_effort": "high", "reasoning_history": "all"}}
+
+
+def test_model_profiles_round_trip(tmp_path):
+    cfg = GameConfig.from_dict({"turn_mode": "single_call",
+                                "model_profiles": {"openai-api/moonshotai/kimi-k3.1-pro": PROFILE}})
+    path = cfg.to_yaml(tmp_path / "c.yaml")
+    assert GameConfig.from_yaml(path).model_profiles == cfg.model_profiles
+
+
+@pytest.mark.parametrize("raw", [
+    {"turn_mode": "two_call", "model_profiles": {"m": PROFILE}},                  # thinking off
+    {"turn_mode": "single_call", "model_profiles": {"m": {"generate": {}}}},      # no base_url
+    {"turn_mode": "single_call", "model_profiles": {"m": {**PROFILE, "x": 1}}},   # unknown key
+])
+def test_bad_model_profiles_raise(raw):
+    with pytest.raises(ValueError):
+        GameConfig.from_dict(raw)
+
+
+def test_profile_seats_are_called_with_the_profile(monkeypatch):
+    import Carrot_Parsnip_Agents as cpa
+    seen = []
+    monkeypatch.setattr(cpa, "get_model", lambda name, **kw: seen.append((name, kw)))
+    model = "openai-api/moonshotai/kimi-k3.1-pro"
+    cfg = GameConfig.from_dict({"turn_mode": "single_call", "model_profiles": {model: PROFILE}})
+    cpa.player_model(model, cfg)
+    cpa.player_model("openrouter/other/model", cfg)
+    (name, kw), (other, other_kw) = seen
+    assert name == model and kw["base_url"] == PROFILE["base_url"]
+    assert kw["config"].max_tokens == 262144 and kw["config"].reasoning_history == "all"
+    assert other_kw["config"].max_tokens == cfg.max_tokens          # unlisted models: unchanged
