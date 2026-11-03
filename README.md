@@ -70,6 +70,31 @@ cfg = GameConfig.from_yaml("configs/uncertain_two_parsnips.yaml")
 stats = run_games(num_games=10, base_seed=0, config=cfg)
 ```
 
+## Audited games (`audit.py`)
+
+An outside auditor watches the game and names the Parsnip before the players' vote. After
+each discussion round it can question every player (`audit.questions`: `none`, `public`, or
+`private`). A detector can be injected: any object with
+`async score(model, messages, tools) -> str`. It reads every player message together with that
+player's own conversation (system prompt, reasoning, the message), and the auditor sees its
+reading verbatim after the message. Every prompt and setting is in the `audit:` section of the
+game config.
+
+Each model's call settings (endpoint, sampling, thinking, `max_tokens`, reasoning history) are
+injected per model string through `model_profiles`. The experiment that runs the game sets
+them, and the game adds nothing to them. Profiles need `turn_mode: single_call`: one call that
+reasons in the model's own thinking and then acts.
+
+```python
+from audit import run_audited_games
+cfg = GameConfig.from_dict({"turn_mode": "single_call", "eval_model": M, "audit": {"model": M, "questions": "public"},
+                            "model_profiles": {M: {"base_url": URL, "generate": {...}}}})
+run_audited_games(cfg, seeds=[0, 1], detector=my_detector, out_dir="out", arm="public_god")
+```
+
+This writes `games_{arm}.json`, `transcripts_{arm}.jsonl` (every player message, its reasoning,
+the detector's input and reading) and `auditor_{arm}.jsonl` (every auditor call).
+
 ## Tests
 
 ```bash
