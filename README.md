@@ -70,6 +70,22 @@ cfg = GameConfig.from_yaml("configs/uncertain_two_parsnips.yaml")
 stats = run_games(num_games=10, base_seed=0, config=cfg)
 ```
 
+## The gifted Carrot (detector)
+
+`run_games(..., detector=d)` gives one Carrot per game a detector. `d` is any object with
+`async score(model, messages, tools) -> str`, the downstream `detectors` interface.
+- **Which Carrot:** the seat is drawn from the game seed alone, so the same seed has the same
+  gifted seat with or without a detector, and arms pair up. It is recorded as `gifted_player`.
+- **What it sees:** a note at the end of its system prompt, and a reading under every other
+  player's announcement in each discussion and vote turn. Everything else is the same as every
+  other Carrot: model, prompts, tools, turns.
+- **What the detector reads:** each announcement together with the speaker's own conversation
+  for that turn (system prompt, prompt, private reasoning, the announcing message) and the
+  tools offered. The reading is shown verbatim.
+- **Other players** are not told about the detector.
+- **Results:** readings are recorded per game in `readings`. Both prompt texts are injectable
+  (`prompts.detector_note`, `prompts.detector_reading`).
+
 ## Tests
 
 ```bash

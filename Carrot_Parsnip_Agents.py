@@ -19,13 +19,14 @@ from inspect_ai.dataset import Sample
 from inspect_ai.model import (
     ChatMessageAssistant,
     ChatMessageSystem,
+    ChatMessageTool,
     ChatMessageUser,
     ContentReasoning,
     GenerateConfig,
     execute_tools,
     get_model,
 )
-from inspect_ai.tool import tool, Tool
+from inspect_ai.tool import tool, Tool, ToolDef
 
 _script_dir = str(Path(__file__).resolve().parent)
 if _script_dir not in sys.path:
@@ -83,6 +84,30 @@ def player_model(model_name: str, config: GameConfig):
         # reasoning_enabled is an OpenRouter-specific model arg.
         return get_model(model_name, config=gen_config, reasoning_enabled=False)
     return get_model(model_name, config=gen_config)
+
+
+def chat_message_dict(message) -> dict:
+    """A chat message as a detector reads it (OpenAI format, private reasoning kept)."""
+    if isinstance(message, ChatMessageAssistant):
+        out = {"role": "assistant", "content": message.text,
+               "reasoning_content": "\n".join(c.reasoning for c in message.content
+                                              if isinstance(c, ContentReasoning))
+               if not isinstance(message.content, str) else ""}
+        if message.tool_calls:
+            out["tool_calls"] = [{"id": tc.id, "type": "function",
+                                  "function": {"name": tc.function, "arguments": dict(tc.arguments)}}
+                                 for tc in message.tool_calls]
+        return out
+    if isinstance(message, ChatMessageTool):
+        return {"role": "tool", "tool_call_id": message.tool_call_id, "content": message.text}
+    return {"role": message.role, "content": message.text}
+
+
+def tool_schema(t) -> dict:
+    """An Inspect tool as an OpenAI function schema (what the detector is told the player had)."""
+    d = ToolDef(t)
+    return {"type": "function", "function": {"name": d.name, "description": d.description,
+                                             "parameters": d.parameters.model_dump(exclude_none=True)}}
 
 
 class ReasoningNotExposedError(RuntimeError):
@@ -231,6 +256,7 @@ def CarrotParsnipOrchestrator(
     seed: Optional[int] = None,
     result_out: Optional[dict] = None,
     config: Optional[GameConfig] = None,
+    detector=None,
 ):
     """
     Top-level agent that runs a full Carrot-Parsnip game of LLM players.
@@ -263,6 +289,15 @@ def CarrotParsnipOrchestrator(
     carrot_models = config.carrot.models
     game = make_game(config, seed=seed)
     game.start()
+
+    # The gifted Carrot: one Carrot seat, drawn from the seed alone, so a game
+    # with a detector and one without have the same gifted seat (arms pair up).
+    # With a detector (any object with async score(model, messages, tools) ->
+    # str) it sees the detector's reading of every other player's announcement;
+    # otherwise it is the same as every other Carrot.
+    carrot_seats = [p.index for p in game.players if p.role == Role.CARROT]
+    gifted = random.Random(f"gifted:{seed}").choice(carrot_seats)
+    readings: list[dict] = []
 
     announcements_store: dict = {"messages": []}
 
@@ -320,7 +355,15 @@ def CarrotParsnipOrchestrator(
     # Announcement helpers
     # ------------------------------------------------------------------
 
-    def get_recent_announcements(since_index: int = 0) -> str:
+    def system_prompt(player_index: int) -> str:
+        text = render_system_prompt(config, game.players[player_index].name)
+        if detector is not None and player_index == gifted:
+            text += "\n\n" + config.prompts.detector_note
+        return text
+
+    def get_recent_announcements(since_index: int = 0, viewer: Optional[int] = None) -> str:
+        """The announcements as ``viewer`` sees them: the gifted Carrot also
+        sees the detector's reading of every other player's announcement."""
         messages = announcements_store.get("messages", [])
         if since_index >= len(messages):
             return ""
@@ -334,7 +377,25 @@ def CarrotParsnipOrchestrator(
                 lines.append(f'  [{ctx}] {msg["player"]}: "{msg["message"]}"')
             else:
                 lines.append(f'  {msg["player"]}: "{msg["message"]}"')
+            if viewer == gifted and "reading" in msg:
+                lines.append(config.prompts.detector_reading.format(reading=msg["reading"]))
         return "\n".join(lines)
+
+    async def read_announcement(player_index: int, messages: list, tools: list) -> None:
+        """The detector's reading of the announcement ``player_index`` just
+        made (``messages``: that player's conversation, ending in the message
+        that made it), stored on the announcement for the gifted Carrot."""
+        model = model_name_for_player(player_index) or config.eval_model
+        reading = await detector.score(model, [chat_message_dict(m) for m in messages],
+                                       [tool_schema(t) for t in tools])
+        if not isinstance(reading, str) or not reading.strip():
+            raise TypeError(f"a detector reading is a non-empty str, got {reading!r}")
+        announcement = announcements_store["messages"][-1]
+        if announcement["player_index"] != player_index:
+            raise AssertionError("the last announcement is not this player's")
+        announcement["reading"] = reading
+        readings.append({"player": game.players[player_index].name, "message": announcement["message"],
+                         "context": announcement["context"], "reading": reading})
 
     async def run_group_discussion(
         state: AgentState,
@@ -374,7 +435,7 @@ def CarrotParsnipOrchestrator(
                     game_state_text,
                 )
 
-                announcements_text = get_recent_announcements()
+                announcements_text = get_recent_announcements(viewer=player_index)
 
                 # Build a speaking-order summary so the player knows who
                 # has already had a chance to speak and who hasn't yet.
@@ -390,7 +451,7 @@ def CarrotParsnipOrchestrator(
                 speaking_order_text = "Speaking order this round:\n" + "\n".join(order_lines)
 
                 system_msg = ChatMessageSystem(
-                    content=render_system_prompt(config, player.name)
+                    content=system_prompt(player_index)
                 )
 
                 reasoning_prompt = ChatMessageUser(
@@ -469,6 +530,9 @@ def CarrotParsnipOrchestrator(
                         isinstance(last_result, str)
                         and last_result.startswith("Your announcement has been made public")
                     ):
+                        if detector is not None and player_index != gifted:
+                            await read_announcement(
+                                player_index, messages[:len(messages) - len(tool_messages)], tools)
                         break
 
                     # The tool call went through but returned an error
@@ -499,12 +563,12 @@ def CarrotParsnipOrchestrator(
 
         announcements_text = ""
         if discussion:
-            announcements_text = get_recent_announcements()
+            announcements_text = get_recent_announcements(viewer=player_index)
             if announcements_text:
                 announcements_text = f"\n\n{announcements_text}\n"
 
         system_msg = ChatMessageSystem(
-            content=render_system_prompt(config, player.name)
+            content=system_prompt(player_index)
         )
 
         reasoning_prompt = ChatMessageUser(
@@ -631,6 +695,9 @@ def CarrotParsnipOrchestrator(
                     "correct": correct,
                 })
             result_out["votes"] = votes
+            result_out["gifted_player"] = game.players[gifted].name
+            result_out["detector"] = detector is not None
+            result_out["readings"] = readings
 
             if game.phase != GamePhase.GAME_OVER:
                 # At least one player never cast a valid vote, so the game
@@ -731,13 +798,14 @@ def get_openrouter_credits() -> tuple[float, float | None] | None:
 # ── Batch Runner ─────────────────────────────────────────────────────────
 
 
-def _make_game_task(name: str, seed: int, result_out: dict, config: GameConfig) -> Task:
+def _make_game_task(name: str, seed: int, result_out: dict, config: GameConfig,
+                    detector=None) -> Task:
     """Build a single-sample Inspect task that plays one game."""
     return Task(
         name=name,
         dataset=[Sample(input="", target="")],
         solver=as_solver(
-            CarrotParsnipOrchestrator(seed=seed, result_out=result_out, config=config)
+            CarrotParsnipOrchestrator(seed=seed, result_out=result_out, config=config, detector=detector)
         ),
         message_limit=config.message_limit,
     )
@@ -1043,6 +1111,7 @@ def run_games(
     base_seed: int = 0,
     config: Optional[GameConfig] = None,
     max_concurrent: Optional[int] = None,
+    detector=None,
 ) -> dict:
     """
     Run *num_games* Carrot-Parsnip games and report statistics.
@@ -1055,6 +1124,11 @@ def run_games(
             load one from YAML with ``GameConfig.from_yaml(path)``.
         max_concurrent: Maximum number of games running at once
             (default ``config.max_concurrent_games``).
+        detector: None, or any object with ``async score(model, messages,
+            tools) -> str`` (the downstream ``detectors`` interface). One
+            Carrot per game (``gifted_player``, drawn from the seed) sees its
+            reading of every other player's announcement; it is otherwise the
+            same as every other Carrot.
 
     Returns:
         Dictionary with aggregated statistics and per-game results.
@@ -1072,6 +1146,7 @@ def run_games(
             seed=base_seed + i,
             result_out=result_holders[i],
             config=config,
+            detector=detector,
         )
         for i in range(num_games)
     ]
