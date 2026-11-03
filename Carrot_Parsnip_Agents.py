@@ -812,9 +812,10 @@ def _make_game_task(name: str, seed: int, result_out: dict, config: GameConfig,
 
 
 def _run_tasks(tasks: list[Task], max_concurrent: int,
-               max_connections: Optional[int] = None) -> tuple[list, dict]:
+               max_connections: Optional[int] = None, model=None) -> tuple[list, dict]:
     """
     Run *tasks* with up to *max_concurrent* games in flight at once.
+    *model*: the eval's default model (None: INSPECT_EVAL_MODEL, by name).
 
     Returns ``(eval_logs, cost_info)`` where *cost_info* holds the change
     in OpenRouter usage over the run (``cost``, ``usage_before``,
@@ -827,7 +828,7 @@ def _run_tasks(tasks: list[Task], max_concurrent: int,
     usage_before = _credits_before[0] if _credits_before else None
 
     eval_logs = eval(
-        tasks, log_dir=log_dir, max_tasks=max_concurrent,
+        tasks, log_dir=log_dir, max_tasks=max_concurrent, model=model,
         max_connections=max_connections,  # None: Inspect's default (10 per model)
     )
 
@@ -1151,7 +1152,11 @@ def run_games(
         for i in range(num_games)
     ]
 
-    eval_logs, cost_info = _run_tasks(tasks, max_concurrent, config.max_connections)
+    # A profiled default model is built with its endpoint: by name alone, Inspect
+    # would look for <PROVIDER>_BASE_URL in the environment.
+    default_model = (player_model(config.eval_model, config)
+                     if config.eval_model in config.model_profiles else None)
+    eval_logs, cost_info = _run_tasks(tasks, max_concurrent, config.max_connections, default_model)
 
     # Inspect catches Ctrl+C itself and returns "cancelled" logs instead of
     # raising, so re-raise here to let callers stop.
